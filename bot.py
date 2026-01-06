@@ -19,7 +19,7 @@ from telegram.ext import (
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = ""
+# BOT_TOKEN = ""
 
 ADMINS = [
     5546945332,  # ID админа 1
@@ -325,3 +325,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
