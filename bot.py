@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.1"
+BOT_VERSION = "1.1.2"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -42,6 +42,13 @@ BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 
 # Настройки
 AUTO_CLEAN_DAYS = 30
+
+# Шаблоны причин отклонения
+REJECT_TEMPLATES = [
+    "❌ Неверный кадастровый номер",
+    "❌ Нечитаемое фото/документ",
+    "❌ Несоответствие данных"
+]
 
 # ================== УТИЛИТЫ ==================
 def ensure_dirs() -> None:
@@ -183,7 +190,7 @@ def create_admin_buttons(app_id: str, blocked: bool = False) -> InlineKeyboardMa
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{app_id}"),
             InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{app_id}")
         ],
-        [InlineKeyboardButton("✉️ Ответить пользователю", callback_data=f"reply:{app_id}")],
+        [InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{app_id}")],
     ]
     
     if blocked:
@@ -191,6 +198,14 @@ def create_admin_buttons(app_id: str, blocked: bool = False) -> InlineKeyboardMa
     else:
         buttons.append([InlineKeyboardButton("🚫 Заблокировать", callback_data=f"block:{app_id}")])
     
+    return InlineKeyboardMarkup(buttons)
+
+def create_reject_templates_keyboard() -> InlineKeyboardMarkup:
+    """Создает клавиатуру с шаблонами причин отклонения"""
+    buttons = []
+    for template in REJECT_TEMPLATES:
+        buttons.append([InlineKeyboardButton(template, callback_data=f"reject_template:{template}")])
+    buttons.append([InlineKeyboardButton("✏️ Своя причина", callback_data="reject_custom")])
     return InlineKeyboardMarkup(buttons)
 
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
@@ -253,6 +268,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             status_msg = f"📋 Ваша заявка\n\n🏠 Квартира: {app.get('flat', '—')}\n📌 Статус: {app.get('status', '—')}"
             if app.get("reject_reason"):
                 status_msg += f"\n\nПричина отклонения:\n{app['reject_reason']}"
+                # Добавляем кнопку для новой заявки после отклонения
+                if app.get("status") == STATUS_TEXT["rejected"]:
+                    status_msg += "\n\n📝 Чтобы подать новую заявку, нажмите /start"
             await update.message.reply_text(status_msg)
         return
     
@@ -267,10 +285,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if step == "contact":
         contact_msg = (
-            f"✉️ Новое сообщение от пользователя\n\n"
-            f"👤 Пользователь: {user.full_name}\n"
-            f"📱 Ник: @{user.username if user.username else '—'}\n"
-            f"🆔 ID: {user.id}\n\n"
+            f"✉️ Сообщение от пользователя\n\n"
+            f"Имя: {user.full_name}\n"
+            f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
+            f"ID: {user.id}\n\n"
             f"📝 Сообщение:\n{text}"
         )
         
@@ -313,7 +331,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         confirm_text = (
             f"📋 Проверьте введенные данные:\n\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
-            f"📄 Кадастровый номер:\n"
+            f"📄 Кадастр:\n"
             f"```\n{cadastre}\n```\n\n"
             f"Всё верно?"
         )
@@ -340,15 +358,15 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             blocked = is_blocked(int(uid))
             
             app_text = (
-                f"👤 {app.get('name', '—')}\n"
-                f"📱 Ник: @{app.get('username', '—')}\n"
-                f"🆔 ID: {uid}\n"
+                f"Имя: {app.get('name', '—')}\n"
+                f"👨‍💻 Ник: @{app.get('username', '—')}\n"
+                f"ID: {uid}\n"
                 f"🏠 Квартира: {app.get('flat', '—')}\n"
                 f"📌 Статус: {app.get('status', '—')}\n"
             )
             
             if app.get("cadastre"):
-                app_text += f"\n📄 Кадастровый номер:\n```\n{app['cadastre']}\n```\n"
+                app_text += f"\n📄 Кадастр:\n```\n{app['cadastre']}\n```\n"
             
             if blocked:
                 app_text += "\n🚫 Заблокирован"
@@ -456,15 +474,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if save_json(APPS_FILE, apps):
         # Уведомляем администраторов
         app_info = (
-            f"🆕 Новая заявка (файл)\n\n"
-            f"👤 Пользователь: {user.full_name}\n"
-            f"📱 Ник: @{user.username if user.username else '—'}\n"
-            f"🆔 ID: {user.id}\n"
+            f"Заявка:\n\n"
+            f"Имя: {user.full_name}\n"
+            f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
+            f"ID: {user.id}\n"
             f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
         )
         
         if context.user_data.get("cad"):
-            app_info += f"\n📄 Кадастровый номер:\n```\n{context.user_data['cad']}\n```\n"
+            app_info += f"\n📄 Кадастр:\n```\n{context.user_data['cad']}\n```\n"
         
         for admin_id in ADMINS:
             try:
@@ -504,12 +522,12 @@ async def handle_user_callback(query, context, data, user):
         
         # Уведомляем администраторов
         app_info = (
-            f"🆕 Новая заявка\n\n"
-            f"👤 Пользователь: {u.full_name}\n"
-            f"📱 Ник: @{u.username if u.username else '—'}\n"
-            f"🆔 ID: {u.id}\n"
+            f"Заявка:\n\n"
+            f"Имя: {u.full_name}\n"
+            f"👨‍💻 Ник: @{u.username if u.username else '—'}\n"
+            f"ID: {u.id}\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
-            f"📄 Кадастровый номер:\n```\n{context.user_data['cad']}\n```"
+            f"📄 Кадастр:\n```\n{context.user_data['cad']}\n```"
         )
         
         for admin_id in ADMINS:
@@ -539,10 +557,23 @@ async def handle_admin_callback(query, context, data, user):
         return
     
     if ":" not in data:
-        await query.edit_message_text("❌ Неверный формат команды.")
-        return
+        # Обработка шаблонов причин отклонения
+        if data == "reject_custom":
+            await query.edit_message_text("✏️ Введите свою причину отклонения:")
+            context.chat_data["rejecting_app"] = context.chat_data.get("pending_reject_app")
+            return
+        else:
+            await query.edit_message_text("❌ Неверный формат команды.")
+            return
     
     action, target_id = data.split(":", 1)
+    
+    # Обработка шаблонов причин отклонения
+    if action == "reject_template":
+        app_id = context.chat_data.get("pending_reject_app")
+        if app_id:
+            await process_rejection(context, app_id, target_id, query)
+        return
     
     apps = load_json(APPS_FILE, {})
     blacklist = load_json(BLACKLIST_FILE, [])
@@ -580,14 +611,46 @@ async def handle_admin_callback(query, context, data, user):
     
     if action == "reject":
         if target_id in apps:
-            context.chat_data["rejecting_app"] = target_id
-            await query.edit_message_text("📝 Укажите причину отклонения заявки:")
+            # Сохраняем ID заявки для отклонения
+            context.chat_data["pending_reject_app"] = target_id
+            # Показываем шаблоны причин
+            await query.edit_message_text(
+                "📝 Выберите причину отклонения:",
+                reply_markup=create_reject_templates_keyboard()
+            )
         return
     
     if action == "reply":
         context.chat_data["replying_to"] = target_id
         await query.edit_message_text("✉️ Введите ответ для пользователя:")
         return
+
+async def process_rejection(context, app_id, reason, query=None):
+    """Обработка отклонения заявки"""
+    apps = load_json(APPS_FILE, {})
+    
+    if app_id in apps:
+        apps[app_id]["status"] = STATUS_TEXT["rejected"]
+        apps[app_id]["reject_reason"] = reason
+        save_json(APPS_FILE, apps)
+        
+        # Уведомляем пользователя с кнопкой для новой заявки
+        try:
+            await context.bot.send_message(
+                int(app_id),
+                f"❌ Ваша заявка отклонена.\n\nПричина: {reason}\n\n📝 Чтобы подать новую заявку, нажмите /start",
+                reply_markup=ReplyKeyboardMarkup([["/start"]], resize_keyboard=True)
+            )
+        except:
+            pass
+        
+        if query:
+            await query.edit_message_text(f"✅ Заявка отклонена.\nПричина: {reason}")
+        
+        # Очищаем контекст
+        context.chat_data.pop("pending_reject_app", None)
+        return True
+    return False
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Главный обработчик callback-запросов"""
@@ -611,30 +674,15 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_admin(user.id):
         return
     
-    # Проверяем, является ли это ответом на запрос причины отклонения
+    # Обработка своей причины отклонения
     if "rejecting_app" in context.chat_data:
         app_id = context.chat_data["rejecting_app"]
-        apps = load_json(APPS_FILE, {})
-        
-        if app_id in apps:
-            apps[app_id]["status"] = STATUS_TEXT["rejected"]
-            apps[app_id]["reject_reason"] = text
-            save_json(APPS_FILE, apps)
-            
-            try:
-                await context.bot.send_message(
-                    int(app_id),
-                    f"❌ Ваша заявка отклонена.\nПричина:\n{text}"
-                )
-            except:
-                pass
-            
-            await update.message.reply_text(f"✅ Заявка отклонена. Причина отправлена.")
-        
+        await process_rejection(context, app_id, text)
+        await update.message.reply_text(f"✅ Заявка отклонена.\nПричина: {text}")
         context.chat_data.pop("rejecting_app", None)
         return
     
-    # Проверяем, является ли это ответом пользователю
+    # Обработка ответа пользователю
     if "replying_to" in context.chat_data:
         target_id = context.chat_data["replying_to"]
         
@@ -668,7 +716,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     
     # Упрощенный обработчик для администраторских ответов
-    # Будет ловить все сообщения от админов и проверять контекст
     async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to" in context.chat_data):
