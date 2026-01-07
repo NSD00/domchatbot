@@ -2,8 +2,7 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -12,15 +11,16 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import TelegramError
 
 # ================== НАСТРОЙКИ ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment variables")
+    raise RuntimeError("BOT_TOKEN не задан в environment variables")
 
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x]
 if not ADMINS:
-    raise RuntimeError("ADMINS is not set in environment variables")
+    raise RuntimeError("ADMINS не задан в environment variables")
 
 DATA_DIR = "data"
 TEMP_DIR = "temp/files"
@@ -76,25 +76,47 @@ def cleanup_old_applications():
     if changed:
         save_json(APPLICATIONS_FILE, apps)
 
+# ================== ОЧИСТКА WEBHOOK/PENDING ==================
+def reset_telegram(bot: Bot):
+    try:
+        bot.delete_webhook(drop_pending_updates=True)
+        logging.info("✅ Сброшены старые webhook и pending updates")
+    except TelegramError as e:
+        logging.warning(f"Не удалось сбросить webhook: {e}")
+
 # ================== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     apps = load_json(APPLICATIONS_FILE, {})
+
     if str(user_id) in apps and apps[str(user_id)]["status"] == "pending":
         await update.message.reply_text("⏳ У вас уже есть заявка на рассмотрении.")
         return
 
     context.user_data.clear()
     context.user_data["step"] = "flat"
-    await update.message.reply_text("🏠 Верификация для домового чата\n\nВведите номер квартиры:")
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("FAQ", callback_data="faq"),
+         InlineKeyboardButton("Связь с админом", callback_data="contact")]
+    ])
+
+    await update.message.reply_text(
+        "🏠 Верификация для домового чата\n\nВведите номер квартиры:",
+        reply_markup=keyboard
+    )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apps = load_json(APPLICATIONS_FILE, {})
     app = apps.get(str(update.effective_user.id))
+
     if not app:
         await update.message.reply_text("❌ Заявка не найдена.")
         return
-    await update.message.reply_text(f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown")
+
+    await update.message.reply_text(
+        f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown"
+    )
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -105,7 +127,9 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✉️ Напишите сообщение, я передам его администратору.")
+    await update.message.reply_text(
+        "✉️ Напишите сообщение, я передам его администратору."
+    )
     context.user_data["step"] = "contact_admin"
 
 # ================== ОБРАБОТКА СООБЩЕНИЙ ==================
@@ -116,7 +140,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "flat":
         context.user_data["flat"] = update.message.text.strip()
         context.user_data["step"] = "cadastre"
-        await update.message.reply_text("Введите кадастровый номер или отправьте фото / PDF документа:")
+        await update.message.reply_text(
+            "Введите кадастровый номер или отправьте фото / PDF документа:"
+        )
         return
 
     if step == "cadastre":
@@ -127,17 +153,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data["cadastre_raw"] = text
         context.user_data["cadastre_norm"] = normalized
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Да", callback_data="cad_ok"),
-                                          InlineKeyboardButton("❌ Нет", callback_data="cad_no")]])
-        await update.message.reply_text(f"Получилось так:\n`{normalized}`\n\nВерно?", reply_markup=keyboard, parse_mode="Markdown")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Да", callback_data="cad_ok"),
+             InlineKeyboardButton("❌ Нет", callback_data="cad_no")]
+        ])
+        await update.message.reply_text(
+            f"Получилось так:\n`{normalized}`\n\nВерно?",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
         return
 
     if step == "contact_admin":
         for admin in ADMINS:
-            try:
-                await context.bot.send_message(admin, f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}")
-            except Exception:
-                pass
+            await context.bot.send_message(
+                admin,
+                f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}"
+            )
         await update.message.reply_text("✅ Сообщение отправлено.")
         context.user_data.clear()
 
@@ -145,19 +177,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = None
     ext = ""
+
     if update.message.photo:
         file = update.message.photo[-1]
         ext = "jpg"
     elif update.message.document:
         file = update.message.document
         ext = update.message.document.file_name.split(".")[-1]
+
     if not file:
         return
 
     tg_file = await file.get_file()
     path = f"{TEMP_DIR}/{file.file_id}.{ext}"
     await tg_file.download_to_drive(path)
-    context.user_data.setdefault("files", []).append({"file_id": file.file_id, "path": path, "type": ext})
+
+    context.user_data.setdefault("files", []).append({
+        "file_id": file.file_id,
+        "path": path,
+        "type": ext
+    })
 
     await update.message.reply_text("📎 Файл принят. Заявка отправляется админу.")
     await submit_application(update, context)
@@ -173,6 +212,10 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cad_no":
         context.user_data["step"] = "cadastre"
         await query.edit_message_text("Введите номер ещё раз.")
+    elif query.data == "faq":
+        await faq(update, context)
+    elif query.data == "contact":
+        await contact(update, context)
     elif query.data.startswith("admin_"):
         if not is_admin(user_id):
             return
@@ -187,7 +230,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             app["status"] = "approved"
             app["processed_by"] = user_id
             await context.bot.send_message(int(target_id), "✅ Ваша заявка одобрена. Ссылка у администратора.")
-
         if action == "admin_reject":
             app["status"] = "rejected"
             app["processed_by"] = user_id
@@ -196,10 +238,11 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_json(APPLICATIONS_FILE, apps)
         await query.edit_message_text(f"✔️ Решение принято администратором {user_id}")
 
-# ================== ПОДАЧА ЗАЯВОК ==================
+# ================== ОТПРАВКА ЗАЯВКИ ==================
 async def submit_application(source, context):
     user_id = source.from_user.id
     apps = load_json(APPLICATIONS_FILE, {})
+
     apps[str(user_id)] = {
         "user_id": user_id,
         "flat": context.user_data.get("flat"),
@@ -212,58 +255,40 @@ async def submit_application(source, context):
     save_json(APPLICATIONS_FILE, apps)
 
     for admin in ADMINS:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
-                                          InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")]])
-        try:
-            await context.bot.send_message(admin,
-                f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
-                reply_markup=keyboard)
-        except Exception:
-            pass
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
+             InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")]
+        ])
+        await context.bot.send_message(
+            admin,
+            f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
+            reply_markup=keyboard
+        )
 
     if hasattr(source, "edit_message_text"):
         await source.edit_message_text("⏳ Заявка отправлена.")
     else:
         await source.message.reply_text("⏳ Заявка отправлена.")
+
     context.user_data.clear()
-
-# ================== МЕНЮ АДМИНА ==================
-async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ У вас нет прав администратора.")
-        return
-
-    apps = load_json(APPLICATIONS_FILE, {})
-    pending_apps = [a for a in apps.values() if a["status"] == "pending"]
-    if not pending_apps:
-        await update.message.reply_text("📭 Нет новых заявок.")
-        return
-
-    for app in pending_apps:
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{app['user_id']}"),
-                                          InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{app['user_id']}")]])
-        await update.message.reply_text(
-            f"👤 Пользователь: {app['user_id']}\n🏠 Квартира: {app['flat']}\n📄 Кадастр: {app['cadastre_normalized']}",
-            reply_markup=keyboard
-        )
 
 # ================== MAIN ==================
 def main():
     ensure_dirs()
     cleanup_old_applications()
 
+    bot = Bot(BOT_TOKEN)
+    reset_telegram(bot)
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("faq", faq))
-    app.add_handler(CommandHandler("contact", contact))
-    app.add_handler(CommandHandler("menu", admin_menu))
-
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    logging.info("✅ Application started")
     app.run_polling()
 
 if __name__ == "__main__":
