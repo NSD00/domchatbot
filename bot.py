@@ -1,14 +1,11 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -30,8 +27,6 @@ if not ADMINS:
 DATA_DIR = "data"
 TEMP_DIR = "temp/files"
 APPLICATIONS_FILE = f"{DATA_DIR}/applications.json"
-DIALOGS_FILE = f"{DATA_DIR}/dialogs.json"
-STATS_FILE = f"{DATA_DIR}/stats.json"
 
 APPLICATION_TTL_DAYS = 7
 
@@ -65,18 +60,12 @@ def normalize_cadastre(text: str):
     digits = "".join(ch for ch in text if ch.isdigit())
     if len(digits) < 12:
         return None
-    parts = [
-        digits[0:2],
-        digits[2:4],
-        digits[4:-3],
-        digits[-3:]
-    ]
-    return ":".join(parts)
+    return ":".join([digits[0:2], digits[2:4], digits[4:-3], digits[-3:]])
 
 def cleanup_old_applications():
     apps = load_json(APPLICATIONS_FILE, {})
     changed = False
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
 
     for uid in list(apps.keys()):
         created = datetime.fromisoformat(apps[uid]["created_at"])
@@ -105,10 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["step"] = "flat"
 
-    await update.message.reply_text(
-        "🏠 Верификация для домового чата\n\n"
-        "Введите номер квартиры:"
-    )
+    await update.message.reply_text("🏠 Верификация для домового чата\n\nВведите номер квартиры:")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apps = load_json(APPLICATIONS_FILE, {})
@@ -118,10 +104,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Заявка не найдена.")
         return
 
-    await update.message.reply_text(
-        f"📄 Статус заявки: **{app['status']}**",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown")
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -132,9 +115,7 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✉️ Напишите сообщение, я передам его администратору."
-    )
+    await update.message.reply_text("✉️ Напишите сообщение, я передам его администратору.")
     context.user_data["step"] = "contact_admin"
 
 # ================== ОБРАБОТКА СООБЩЕНИЙ ==================
@@ -146,10 +127,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "flat":
         context.user_data["flat"] = update.message.text.strip()
         context.user_data["step"] = "cadastre"
-        await update.message.reply_text(
-            "Введите кадастровый номер\n"
-            "или отправьте фото / PDF документа:"
-        )
+        await update.message.reply_text("Введите кадастровый номер\nили отправьте фото / PDF документа:")
         return
 
     if step == "cadastre":
@@ -164,24 +142,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["cadastre_norm"] = normalized
 
         keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Да", callback_data="cad_ok"),
-                InlineKeyboardButton("❌ Нет", callback_data="cad_no"),
-            ]
+            [InlineKeyboardButton("✅ Да", callback_data="cad_ok"), InlineKeyboardButton("❌ Нет", callback_data="cad_no")]
         ])
 
-        await update.message.reply_text(
-            f"Получилось так:\n`{normalized}`\n\nВерно?",
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"Получилось так:\n`{normalized}`\n\nВерно?", reply_markup=keyboard, parse_mode="Markdown")
 
     if step == "contact_admin":
         for admin in ADMINS:
-            await context.bot.send_message(
-                admin,
-                f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}"
-            )
+            await context.bot.send_message(admin, f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}")
         await update.message.reply_text("✅ Сообщение отправлено.")
         context.user_data.clear()
 
@@ -205,12 +173,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = f"{TEMP_DIR}/{file.file_id}.{ext}"
     await tg_file.download_to_drive(path)
 
-    context.user_data.setdefault("files", []).append({
-        "file_id": file.file_id,
-        "path": path,
-        "type": ext
-    })
-
+    context.user_data.setdefault("files", []).append({"file_id": file.file_id, "path": path, "type": ext})
     await update.message.reply_text("📎 Файл принят. Заявка отправляется админу.")
     await submit_application(update, context)
 
@@ -224,31 +187,24 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cad_ok":
         await submit_application(query, context)
-
-    if query.data == "cad_no":
+    elif query.data == "cad_no":
         context.user_data["step"] = "cadastre"
         await query.edit_message_text("Введите номер ещё раз.")
-
-    if query.data.startswith("admin_"):
-        if not is_admin(user_id):
-            return
-
+    elif query.data.startswith("admin_") and is_admin(user_id):
         action, target_id = query.data.split(":")
         apps = load_json(APPLICATIONS_FILE, {})
-        app = apps.get(target_id)
-
-        if not app or app["status"] != "pending":
+        app_data = apps.get(target_id)
+        if not app_data or app_data["status"] != "pending":
             await query.edit_message_text("⚠️ Заявка уже обработана.")
             return
 
         if action == "admin_approve":
-            app["status"] = "approved"
-            app["processed_by"] = user_id
+            app_data["status"] = "approved"
+            app_data["processed_by"] = user_id
             await context.bot.send_message(int(target_id), "✅ Ваша заявка одобрена.")
-
-        if action == "admin_reject":
-            app["status"] = "rejected"
-            app["processed_by"] = user_id
+        elif action == "admin_reject":
+            app_data["status"] = "rejected"
+            app_data["processed_by"] = user_id
             await context.bot.send_message(int(target_id), "❌ Заявка отклонена.")
 
         save_json(APPLICATIONS_FILE, apps)
@@ -267,27 +223,19 @@ async def submit_application(source, context):
         "cadastre_normalized": context.user_data.get("cadastre_norm"),
         "files": context.user_data.get("files", []),
         "status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.utcnow().isoformat(),
     }
 
     save_json(APPLICATIONS_FILE, apps)
 
     for admin in ADMINS:
         keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")
-            ]
+            [InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
+             InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")]
         ])
-
-        await context.bot.send_message(
-            admin,
-            f"🆕 Новая заявка\n\n"
-            f"👤 Пользователь: {user_id}\n"
-            f"🏠 Квартира: {apps[str(user_id)]['flat']}\n"
-            f"📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
-            reply_markup=keyboard
-        )
+        await context.bot.send_message(admin,
+                                       f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
+                                       reply_markup=keyboard)
 
     if hasattr(source, "edit_message_text"):
         await source.edit_message_text("⏳ Заявка отправлена.")
@@ -314,7 +262,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
