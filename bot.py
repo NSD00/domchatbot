@@ -94,9 +94,11 @@ USER_MENU = ReplyKeyboardMarkup(
 )
 
 ADMIN_MENU = ReplyKeyboardMarkup(
-    [["📋 Список заявок"]],
+    [["📋 Список заявок"], ["📦 Экспорт JSON"]],
     resize_keyboard=True
 )
+
+# ================== КНОПКИ ==================
 
 def admin_buttons(uid: str, has_application: bool):
     if not has_application:
@@ -146,7 +148,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.lower()
     step = context.user_data.get("step")
-
     apps = load_json(APPLICATIONS_FILE, {})
 
     # ---------- автоответ на "зачем" ----------
@@ -162,11 +163,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await reply(update, "Заявок нет.")
                 return
             for uid, app in apps.items():
-                buttons = admin_buttons(uid, has_application=True)
-                msg = f"👤 {app['name']}\n🏠 Квартира: {app['flat']}\n📄 Кадастр: {app['cadastre']}\n📌 Статус: {app['status']}"
+                has_app = True
+                buttons = admin_buttons(uid, has_app)
+                msg = (
+                    f"👤 {app['name']}\n"
+                    f"🏠 Квартира: {app['flat']}\n"
+                    f"📄 Кадастр: `{app['cadastre']}`\n"
+                    f"📌 Статус: {app['status']}"
+                )
                 if app.get("reject_reason"):
                     msg += f"\n❗ Причина отклонения: {app['reject_reason']}"
-                await context.bot.send_message(user.id, msg, reply_markup=buttons)
+                await context.bot.send_message(user.id, msg, parse_mode="Markdown", reply_markup=buttons)
+            return
+        # экспорт JSON
+        if text == "📦 экспорт json":
+            await context.bot.send_document(user.id, open(APPLICATIONS_FILE, "rb"), filename="applications.json")
             return
 
         # ответ на пользователя через шаблон
@@ -177,12 +188,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # ---------- пользователь ----------
-    # помощь
     if text == "❓ помощь":
         await reply(update, HELP_TEXT, parse_mode="Markdown")
         return
 
-    # статус заявки
     if text == "📄 статус заявки":
         app = apps.get(str(user.id))
         if not app:
@@ -194,20 +203,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await reply(update, msg)
         return
 
-    # подать заново
     if text == "📝 подать заявку заново":
         context.user_data.clear()
         context.user_data["step"] = "flat"
         await reply(update, "Введите номер квартиры:")
         return
 
-    # связь с админом
     if text == "✉️ связь с админом":
         context.user_data["step"] = "contact_admin"
         await reply(update, "Напишите сообщение администратору:")
         return
 
-    # сообщение для админа
     if step == "contact_admin":
         for admin in ADMINS:
             await context.bot.send_message(
@@ -248,7 +254,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons = admin_buttons(str(user.id), has_application=True)
             await context.bot.send_message(
                 admin,
-                f"🆕 Новая заявка\n👤 {user.full_name}\n🏠 {context.user_data['flat']}\n📄 {norm}",
+                f"🆕 Новая заявка\n👤 {user.full_name}\n🏠 Квартира: {context.user_data['flat']}\n📄 Кадастр: `{norm}`",
+                parse_mode="Markdown",
                 reply_markup=buttons
             )
         context.user_data.clear()
@@ -294,8 +301,13 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         apps[uid]["status"] = STATUS_TEXT["rejected"]
         apps[uid]["reject_reason"] = "Недостаточно данных" if reason=="data" else "Данные не подтверждены"
         save_json(APPLICATIONS_FILE, apps)
-        await context.bot.send_message(int(uid), f"❌ Ваша заявка отклонена.\nПричина: {apps[uid]['reject_reason']}")
-        await query.edit_message_text(f"❌ Заявка отклонена. Причина: {apps[uid]['reject_reason']}")
+        await context.bot.send_message(
+            int(uid),
+            f"❌ Ваша заявка отклонена.\nПричина: {apps[uid]['reject_reason']}"
+        )
+        await query.edit_message_text(
+            f"❌ Заявка отклонена. Причина: {apps[uid]['reject_reason']}"
+        )
         return
 
     if parts[0] == "approve":
