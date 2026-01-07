@@ -1,7 +1,6 @@
 import os
 import json
 import logging
-import mimetypes
 import pathlib
 import re
 from datetime import datetime, timedelta, timezone
@@ -15,12 +14,12 @@ from telegram import (
     ReplyKeyboardRemove
 )
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
+    filters
 )
 
 # ================== НАСТРОЙКИ ЛОГГИРОВАНИЯ ==================
@@ -270,7 +269,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         contact_msg = (
             f"✉️ Новое сообщение от пользователя\n\n"
             f"👤 Пользователь: {user.full_name}\n"
-            f"👤 Ник: @{user.username if user.username else '—'}\n"
+            f"📱 Ник: @{user.username if user.username else '—'}\n"
             f"🆔 ID: {user.id}\n\n"
             f"📝 Сообщение:\n{text}"
         )
@@ -342,7 +341,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             
             app_text = (
                 f"👤 {app.get('name', '—')}\n"
-                f"👤 Ник: @{app.get('username', '—')}\n"
+                f"📱 Ник: @{app.get('username', '—')}\n"
                 f"🆔 ID: {uid}\n"
                 f"🏠 Квартира: {app.get('flat', '—')}\n"
                 f"📌 Статус: {app.get('status', '—')}\n"
@@ -459,7 +458,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         app_info = (
             f"🆕 Новая заявка (файл)\n\n"
             f"👤 Пользователь: {user.full_name}\n"
-            f"👤 Ник: @{user.username if user.username else '—'}\n"
+            f"📱 Ник: @{user.username if user.username else '—'}\n"
             f"🆔 ID: {user.id}\n"
             f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
         )
@@ -507,7 +506,7 @@ async def handle_user_callback(query, context, data, user):
         app_info = (
             f"🆕 Новая заявка\n\n"
             f"👤 Пользователь: {u.full_name}\n"
-            f"👤 Ник: @{u.username if u.username else '—'}\n"
+            f"📱 Ник: @{u.username if u.username else '—'}\n"
             f"🆔 ID: {u.id}\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
             f"📄 Кадастровый номер:\n```\n{context.user_data['cad']}\n```"
@@ -612,6 +611,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_admin(user.id):
         return
     
+    # Проверяем, является ли это ответом на запрос причины отклонения
     if "rejecting_app" in context.chat_data:
         app_id = context.chat_data["rejecting_app"]
         apps = load_json(APPS_FILE, {})
@@ -634,6 +634,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("rejecting_app", None)
         return
     
+    # Проверяем, является ли это ответом пользователю
     if "replying_to" in context.chat_data:
         target_id = context.chat_data["replying_to"]
         
@@ -658,20 +659,25 @@ def main() -> None:
     
     ensure_dirs()
     
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # Создаем приложение для версии 22.3.0
+    app = Application.builder().token(BOT_TOKEN).build()
     
+    # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     
-    # Администраторские ответы (причина отклонения или ответ пользователю)
-    app.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r'^(📝|✉️|.*причина.*|.*ответ.*)', re.IGNORECASE),
-        handle_admin_reply
-    ))
+    # Упрощенный обработчик для администраторских ответов
+    # Будет ловить все сообщения от админов и проверять контекст
+    async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to" in context.chat_data):
+            await handle_admin_reply(update, context)
     
-    # Обычные текстовые сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+    
+    # Обычные текстовые сообщения (низкий приоритет)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
     
     logger.info(f"Бот версии {BOT_VERSION} запускается...")
     app.run_polling(drop_pending_updates=True)
