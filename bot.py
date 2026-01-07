@@ -1,13 +1,15 @@
 import os
 import json
 import logging
-from datetime import datetime, UTC
+import shutil
+from datetime import datetime, timedelta, timezone
 
 from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
+    InputFile
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -19,19 +21,20 @@ from telegram.ext import (
 )
 
 # ================== НАСТРОЙКИ ==================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x]
 
 DATA_DIR = "data"
+TEMP_DIR = f"{DATA_DIR}/temp"
 APPLICATIONS_FILE = f"{DATA_DIR}/applications.json"
+BLACKLIST_FILE = f"{DATA_DIR}/blacklist.json"
 
 logging.basicConfig(level=logging.INFO)
 
 # ================== УТИЛИТЫ ==================
-
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(TEMP_DIR, exist_ok=True)
 
 def load_json(path, default):
     if not os.path.exists(path):
@@ -58,8 +61,41 @@ async def reply(update: Update, text: str, **kwargs):
     elif update.callback_query:
         await update.callback_query.message.reply_text(text, **kwargs)
 
-# ================== ТЕКСТЫ ==================
+def clean_old_applications(days=30):
+    apps = load_json(APPLICATIONS_FILE, {})
+    changed = False
+    now = datetime.now(timezone.utc)
+    for uid in list(apps.keys()):
+        created_at = datetime.fromisoformat(apps[uid]["created_at"])
+        if now - created_at > timedelta(days=days):
+            # удаляем временные файлы
+            temp_file = apps[uid].get("temp_file")
+            if temp_file and os.path.exists(temp_file):
+                os.remove(temp_file)
+            apps.pop(uid)
+            changed = True
+    if changed:
+        save_json(APPLICATIONS_FILE, apps)
 
+def clean_temp_files():
+    for f in os.listdir(TEMP_DIR):
+        fp = os.path.join(TEMP_DIR, f)
+        if os.path.isfile(fp):
+            os.remove(fp)
+
+def add_to_blacklist(uid):
+    blacklist = load_json(BLACKLIST_FILE, [])
+    if uid not in blacklist:
+        blacklist.append(uid)
+        save_json(BLACKLIST_FILE, blacklist)
+
+def remove_from_blacklist(uid):
+    blacklist = load_json(BLACKLIST_FILE, [])
+    if uid in blacklist:
+        blacklist.remove(uid)
+        save_json(BLACKLIST_FILE, blacklist)
+
+# ================== ТЕКСТЫ ==================
 HELP_TEXT = (
     "❓ *Помощь*\n\n"
     "📄 *Зачем нужен кадастровый номер?*\n"
@@ -83,7 +119,6 @@ STATUS_TEXT = {
 }
 
 # ================== МЕНЮ ==================
-
 USER_MENU = ReplyKeyboardMarkup(
     [
         ["📝 Подать заявку заново"],
@@ -94,22 +129,19 @@ USER_MENU = ReplyKeyboardMarkup(
 )
 
 ADMIN_MENU = ReplyKeyboardMarkup(
-    [["📋 Список заявок"], ["📦 Экспорт JSON"]],
+    [["📋 Список заявок"], ["📊 Статистика"]],
     resize_keyboard=True
 )
 
-# ================== КНОПКИ ==================
-
-def admin_buttons(uid: str, has_application: bool):
-    if not has_application:
-        return None
+def admin_buttons(uid: str):
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{uid}"),
             InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{uid}")
         ],
         [
-            InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{uid}")
+            InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{uid}"),
+            InlineKeyboardButton("🚫 Бан", callback_data=f"ban:{uid}")
         ]
     ])
 
@@ -125,207 +157,156 @@ def admin_reject_reasons(uid: str):
         [InlineKeyboardButton("❌ Данные не подтверждены", callback_data=f"reject_reason:verify:{uid}")],
     ])
 
-# ================== СТАРТ ==================
+def cadastre_confirm_buttons(uid: str):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Да", callback_data=f"cadastre_confirm:yes:{uid}"),
+            InlineKeyboardButton("❌ Нет", callback_data=f"cadastre_confirm:no:{uid}")
+        ]
+    ])
 
+def choose_input_buttons():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Ввести кадастр", callback_data="input_method:text"),
+            InlineKeyboardButton("Прислать фото/PDF", callback_data="input_method:file")
+        ]
+    ])
+
+# ================== СТАРТ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ensure_dirs()
+    clean_old_applications()
     context.user_data.clear()
     user = update.effective_user
+
+    blacklist = load_json(BLACKLIST_FILE, [])
+    if user.id in blacklist:
+        await reply(update, "🚫 Вы заблокированы и не можете подавать заявки.")
+        return
 
     if is_admin(user.id):
         await reply(update, "👋 Админ-панель", reply_markup=ADMIN_MENU)
         return
 
-    context.user_data["step"] = "flat"
+    context.user_data["step"] = "choose_input"
     await reply(update,
         "👋 Добро пожаловать!\n\n"
-        "Введите номер квартиры для подачи заявки:",
-        reply_markup=USER_MENU
+        "Для подачи заявки выберите способ предоставления данных:",
+        reply_markup=choose_input_buttons()
     )
 
 # ================== СОБЫТИЯ ==================
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    text = update.message.text.lower()
+    text = update.message.text if update.message else ""
     step = context.user_data.get("step")
     apps = load_json(APPLICATIONS_FILE, {})
 
-    # ---------- автоответ на "зачем" ----------
-    if any(k in text for k in AUTO_HELP_KEYWORDS):
-        await reply(update, HELP_TEXT, parse_mode="Markdown")
+    blacklist = load_json(BLACKLIST_FILE, [])
+    if user.id in blacklist:
+        await reply(update, "🚫 Вы заблокированы.")
         return
 
-    # ---------- админ ----------
-    if is_admin(user.id):
-        # список заявок
-        if text == "📋 список заявок":
-            if not apps:
-                await reply(update, "Заявок нет.")
-                return
-            for uid, app in apps.items():
-                has_app = True
-                buttons = admin_buttons(uid, has_app)
-                msg = (
-                    f"👤 {app['name']}\n"
-                    f"🏠 Квартира: {app['flat']}\n"
-                    f"📄 Кадастр: `{app['cadastre']}`\n"
-                    f"📌 Статус: {app['status']}"
-                )
-                if app.get("reject_reason"):
-                    msg += f"\n❗ Причина отклонения: {app['reject_reason']}"
-                await context.bot.send_message(user.id, msg, parse_mode="Markdown", reply_markup=buttons)
-            return
-        # экспорт JSON
-        if text == "📦 экспорт json":
-            await context.bot.send_document(user.id, open(APPLICATIONS_FILE, "rb"), filename="applications.json")
-            return
-
-        # ответ на пользователя через шаблон
-        if "reply_to" in context.user_data:
-            uid = context.user_data.pop("reply_to")
-            await context.bot.send_message(uid, f"✉️ Ответ администратора:\n\n{update.message.text}")
-            await reply(update, "✅ Ответ отправлен.")
-            return
+    if text.lower() and any(k in text.lower() for k in AUTO_HELP_KEYWORDS):
+        await reply(update, HELP_TEXT, parse_mode="Markdown")
+        return
 
     # ---------- пользователь ----------
-    if text == "❓ помощь":
-        await reply(update, HELP_TEXT, parse_mode="Markdown")
-        return
-
-    if text == "📄 статус заявки":
-        app = apps.get(str(user.id))
-        if not app:
-            await reply(update, "❌ Заявка не найдена.")
-        else:
-            msg = f"📄 Статус заявки: {app['status']}"
-            if app.get("reject_reason"):
-                msg += f"\n❗ Причина отклонения: {app['reject_reason']}"
-            await reply(update, msg)
-        return
-
-    if text == "📝 подать заявку заново":
-        context.user_data.clear()
-        context.user_data["step"] = "flat"
-        await reply(update, "Введите номер квартиры:")
-        return
-
-    if text == "✉️ связь с админом":
-        context.user_data["step"] = "contact_admin"
-        await reply(update, "Напишите сообщение администратору:")
-        return
-
-    if step == "contact_admin":
-        for admin in ADMINS:
-            await context.bot.send_message(
-                admin,
-                f"✉️ Сообщение от пользователя:\n👤 {user.full_name}\n@{user.username}\nID: {user.id}\n\n{text}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user.id}")]
-                ])
-            )
-        context.user_data["step"] = None
-        await reply(update, "✅ Сообщение отправлено.")
-        return
-
-    # шаги подачи заявки
     if step == "flat":
-        context.user_data["flat"] = update.message.text
+        context.user_data["flat"] = text
         context.user_data["step"] = "cadastre"
         await reply(update, "Введите кадастровый номер:")
         return
 
     if step == "cadastre":
-        norm = normalize_cadastre(update.message.text)
+        norm = normalize_cadastre(text)
         if not norm:
             await reply(update, "❌ Неверный формат.")
             return
-        apps[str(user.id)] = {
-            "user_id": user.id,
-            "name": user.full_name,
-            "username": user.username,
-            "flat": context.user_data["flat"],
-            "cadastre": norm,
-            "status": STATUS_TEXT["pending"],
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-        save_json(APPLICATIONS_FILE, apps)
-        # уведомление админов
-        for admin in ADMINS:
-            buttons = admin_buttons(str(user.id), has_application=True)
-            await context.bot.send_message(
-                admin,
-                f"🆕 Новая заявка\n👤 {user.full_name}\n🏠 Квартира: {context.user_data['flat']}\n📄 Кадастр: `{norm}`",
-                parse_mode="Markdown",
-                reply_markup=buttons
-            )
-        context.user_data.clear()
-        await reply(update, "⏳ Заявка отправлена.")
+        context.user_data["cadastre_tmp"] = norm
+        context.user_data["step"] = "cadastre_confirm"
+        await reply(update,
+            f"Вы ввели кадастровый номер: `{norm}`\nВерно?",
+            parse_mode="Markdown",
+            reply_markup=cadastre_confirm_buttons(str(user.id))
+        )
+        return
+
+    if step == "file" and update.message.document:
+        file = update.message.document
+        file_path = os.path.join(TEMP_DIR, f"{user.id}_{file.file_name}")
+        await file.get_file().download_to_drive(file_path)
+        context.user_data["temp_file"] = file_path
+        context.user_data["step"] = "file_confirm"
+        await reply(update, f"Файл `{file.file_name}` получен. Отправляем на проверку?", parse_mode="Markdown",
+                    reply_markup=cadastre_confirm_buttons(str(user.id)))
         return
 
 # ================== CALLBACK ==================
-
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     parts = query.data.split(":")
     apps = load_json(APPLICATIONS_FILE, {})
 
-    if parts[0] == "reply":
-        uid = parts[1]
-        await query.message.reply_text(
-            "Выберите шаблон ответа:",
-            reply_markup=admin_reply_templates(uid)
-        )
+    # ---------- выбор метода ввода ----------
+    if parts[0] == "input_method":
+        method = parts[1]
+        if method=="text":
+            await query.message.reply_text("Введите номер квартиры:")
+            query._bot_data.user_data[query.from_user.id]["step"] = "flat"
+        else:
+            await query.message.reply_text("Отправьте фото или PDF файл:")
+            query._bot_data.user_data[query.from_user.id]["step"] = "file"
         return
 
-    if parts[0] == "reply_tpl":
-        _, tpl, uid = parts
-        text = {
-            "wait": "⏳ Ваша заявка находится на рассмотрении.",
-            "safe": "ℹ️ Кадастровый номер безопасен и используется только для проверки.",
-        }[tpl]
-        await context.bot.send_message(int(uid), text)
-        await query.edit_message_text("Ответ отправлен пользователю.")
-        return
+    # ---------- подтверждение кадастра или файла ----------
+    if parts[0] == "cadastre_confirm":
+        uid = parts[2]
+        user_data = context.user_data
+        user = query.from_user
+        if parts[1]=="yes":
+            app_data = {
+                "user_id": user.id,
+                "name": user.full_name,
+                "username": user.username,
+                "flat": user_data.get("flat"),
+                "status": STATUS_TEXT["pending"],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if user_data.get("cadastre_tmp"):
+                app_data["cadastre"] = user_data.get("cadastre_tmp")
+            if user_data.get("temp_file"):
+                app_data["temp_file"] = user_data.get("temp_file")
+            apps[str(user.id)] = app_data
+            save_json(APPLICATIONS_FILE, apps)
 
-    if parts[0] == "reject":
-        uid = parts[1]
-        await query.message.reply_text(
-            "Выберите причину отказа:",
-            reply_markup=admin_reject_reasons(uid)
-        )
-        return
+            for admin in ADMINS:
+                buttons = admin_buttons(str(user.id))
+                msg = f"🆕 Новая заявка\n👤 {user.full_name}\n"
+                if "flat" in user_data: msg += f"🏠 {user_data['flat']}\n"
+                if "cadastre_tmp" in user_data: msg += f"📄 `{user_data['cadastre_tmp']}`\n"
+                if "temp_file" in user_data: msg += f"📎 Файл прикреплён"
+                await context.bot.send_message(admin, msg, parse_mode="Markdown", reply_markup=buttons)
 
-    if parts[0] == "reject_reason":
-        _, reason, uid = parts
-        apps[uid]["status"] = STATUS_TEXT["rejected"]
-        apps[uid]["reject_reason"] = "Недостаточно данных" if reason=="data" else "Данные не подтверждены"
-        save_json(APPLICATIONS_FILE, apps)
-        await context.bot.send_message(
-            int(uid),
-            f"❌ Ваша заявка отклонена.\nПричина: {apps[uid]['reject_reason']}"
-        )
-        await query.edit_message_text(
-            f"❌ Заявка отклонена. Причина: {apps[uid]['reject_reason']}"
-        )
-        return
-
-    if parts[0] == "approve":
-        uid = parts[1]
-        apps[uid]["status"] = STATUS_TEXT["approved"]
-        save_json(APPLICATIONS_FILE, apps)
-        await context.bot.send_message(int(uid), "✅ Ваша заявка одобрена.")
-        await query.edit_message_text("✅ Заявка одобрена.")
+            user_data.clear()
+            await query.edit_message_text("⏳ Заявка отправлена.")
+        else:
+            user_data["step"] = "cadastre" if user_data.get("cadastre_tmp") else "file"
+            await query.edit_message_text("Введите кадастровый номер заново или отправьте файл.")
         return
 
 # ================== MAIN ==================
-
 def main():
     ensure_dirs()
+    clean_old_applications()
+    clean_temp_files()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
