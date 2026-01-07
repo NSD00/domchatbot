@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -14,7 +14,6 @@ from telegram.ext import (
 )
 
 # ================== НАСТРОЙКИ ==================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
@@ -26,20 +25,15 @@ if not ADMINS:
 DATA_DIR = "data"
 TEMP_DIR = "temp/files"
 APPLICATIONS_FILE = f"{DATA_DIR}/applications.json"
-DIALOGS_FILE = f"{DATA_DIR}/dialogs.json"
-STATS_FILE = f"{DATA_DIR}/stats.json"
-
 APPLICATION_TTL_DAYS = 7
 
 # ================== ЛОГИ ==================
-
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
 # ================== УТИЛИТЫ ==================
-
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
@@ -82,8 +76,7 @@ def cleanup_old_applications():
     if changed:
         save_json(APPLICATIONS_FILE, apps)
 
-# ================== КОМАНДЫ ПОЛЬЗОВАТЕЛЯ ==================
-
+# ================== КОМАНДЫ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     apps = load_json(APPLICATIONS_FILE, {})
@@ -95,21 +88,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["step"] = "flat"
 
-    await update.message.reply_text(
-        "🏠 Верификация для домового чата\n\nВведите номер квартиры:"
-    )
+    await update.message.reply_text("🏠 Верификация для домового чата\n\nВведите номер квартиры:")
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apps = load_json(APPLICATIONS_FILE, {})
     app = apps.get(str(update.effective_user.id))
-
     if not app:
         await update.message.reply_text("❌ Заявка не найдена.")
         return
-
-    await update.message.reply_text(
-        f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown")
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -120,13 +107,10 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✉️ Напишите сообщение, я передам его администратору."
-    )
+    await update.message.reply_text("✉️ Напишите сообщение, я передам его администратору.")
     context.user_data["step"] = "contact_admin"
 
 # ================== ОБРАБОТКА СООБЩЕНИЙ ==================
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     step = context.user_data.get("step")
@@ -134,9 +118,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "flat":
         context.user_data["flat"] = update.message.text.strip()
         context.user_data["step"] = "cadastre"
-        await update.message.reply_text(
-            "Введите кадастровый номер или отправьте фото / PDF документа:"
-        )
+        await update.message.reply_text("Введите кадастровый номер или отправьте фото / PDF документа:")
         return
 
     if step == "cadastre":
@@ -149,32 +131,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["cadastre_raw"] = text
         context.user_data["cadastre_norm"] = normalized
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да", callback_data="cad_ok"),
-             InlineKeyboardButton("❌ Нет", callback_data="cad_no")]
-        ])
-        await update.message.reply_text(
-            f"Получилось так:\n`{normalized}`\n\nВерно?",
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Да", callback_data="cad_ok"),
+                                          InlineKeyboardButton("❌ Нет", callback_data="cad_no")]])
+        await update.message.reply_text(f"Получилось так:\n`{normalized}`\n\nВерно?",
+                                        reply_markup=keyboard, parse_mode="Markdown")
         return
 
     if step == "contact_admin":
         for admin in ADMINS:
-            await context.bot.send_message(
-                admin,
-                f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}"
-            )
+            await context.bot.send_message(admin, f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}")
         await update.message.reply_text("✅ Сообщение отправлено.")
         context.user_data.clear()
 
 # ================== ФАЙЛЫ ==================
-
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = None
     ext = ""
-
     if update.message.photo:
         file = update.message.photo[-1]
         ext = "jpg"
@@ -189,17 +161,11 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = f"{TEMP_DIR}/{file.file_id}.{ext}"
     await tg_file.download_to_drive(path)
 
-    context.user_data.setdefault("files", []).append({
-        "file_id": file.file_id,
-        "path": path,
-        "type": ext
-    })
-
+    context.user_data.setdefault("files", []).append({"file_id": file.file_id, "path": path, "type": ext})
     await update.message.reply_text("📎 Файл принят. Заявка отправляется админу.")
     await submit_application(update, context)
 
 # ================== CALLBACK ==================
-
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -213,7 +179,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("admin_"):
         if not is_admin(user_id):
             return
-
         action, target_id = query.data.split(":")
         apps = load_json(APPLICATIONS_FILE, {})
         app = apps.get(target_id)
@@ -225,8 +190,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             app["status"] = "approved"
             app["processed_by"] = user_id
             await context.bot.send_message(int(target_id), "✅ Ваша заявка одобрена. Ссылка у администратора.")
-
-        if action == "admin_reject":
+        elif action == "admin_reject":
             app["status"] = "rejected"
             app["processed_by"] = user_id
             await context.bot.send_message(int(target_id), "❌ Заявка отклонена.")
@@ -235,11 +199,9 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✔️ Решение принято администратором {user_id}")
 
 # ================== ОТПРАВКА ЗАЯВКИ ==================
-
 async def submit_application(source, context):
     user_id = source.from_user.id
     apps = load_json(APPLICATIONS_FILE, {})
-
     apps[str(user_id)] = {
         "user_id": user_id,
         "flat": context.user_data.get("flat"),
@@ -252,31 +214,24 @@ async def submit_application(source, context):
     save_json(APPLICATIONS_FILE, apps)
 
     for admin in ADMINS:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
-             InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")]
-        ])
-        await context.bot.send_message(
-            admin,
-            f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
-            reply_markup=keyboard
-        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
+                                          InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")]])
+        await context.bot.send_message(admin,
+                                       f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
+                                       reply_markup=keyboard)
 
     if hasattr(source, "edit_message_text"):
         await source.edit_message_text("⏳ Заявка отправлена.")
     else:
         await source.message.reply_text("⏳ Заявка отправлена.")
-
     context.user_data.clear()
 
 # ================== MAIN ==================
-
 def main():
     ensure_dirs()
     cleanup_old_applications()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
+    app = Application.builder().token(BOT_TOKEN).build()  # PTB 22
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("faq", faq))
