@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from telegram import (
     Update,
@@ -9,7 +9,7 @@ from telegram import (
     InlineKeyboardMarkup,
 )
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -76,7 +76,7 @@ def normalize_cadastre(text: str):
 def cleanup_old_applications():
     apps = load_json(APPLICATIONS_FILE, {})
     changed = False
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for uid in list(apps.keys()):
         created = datetime.fromisoformat(apps[uid]["created_at"])
@@ -267,7 +267,7 @@ async def submit_application(source, context):
         "cadastre_normalized": context.user_data.get("cadastre_norm"),
         "files": context.user_data.get("files", []),
         "status": "pending",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
     save_json(APPLICATIONS_FILE, apps)
