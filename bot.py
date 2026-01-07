@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.2"
+BOT_VERSION = "1.1.3"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -169,8 +169,7 @@ USER_MENU = ReplyKeyboardMarkup(
 ADMIN_MENU = ReplyKeyboardMarkup(
     [
         ["📋 Список заявок", "📊 Статистика"],
-        ["🔄 Очистить старые", "📦 Экспорт JSON"],
-        ["🔄 Перезагрузить бота"]
+        ["📦 Экспорт JSON", "🔄 Перезагрузить бота"]
     ],
     resize_keyboard=True
 )
@@ -201,12 +200,14 @@ def create_admin_buttons(app_id: str, blocked: bool = False) -> InlineKeyboardMa
     
     return InlineKeyboardMarkup(buttons)
 
-def create_reject_templates_keyboard() -> InlineKeyboardMarkup:
+def create_reject_templates_keyboard(pending_app_id: str) -> InlineKeyboardMarkup:
     """Создает клавиатуру с шаблонами причин отклонения"""
     buttons = []
     for template in REJECT_TEMPLATES:
-        buttons.append([InlineKeyboardButton(template, callback_data=f"reject_template:{template}")])
-    buttons.append([InlineKeyboardButton("✏️ Своя причина", callback_data="reject_custom")])
+        # Используем безопасный формат callback_data
+        callback_data = f"reject_template_{pending_app_id}_{hash(template) % 10000}"
+        buttons.append([InlineKeyboardButton(template, callback_data=callback_data)])
+    buttons.append([InlineKeyboardButton("✏️ Своя причина", callback_data=f"reject_custom:{pending_app_id}")])
     return InlineKeyboardMarkup(buttons)
 
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
@@ -287,7 +288,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if step == "contact":
         contact_msg = (
             f"✉️ Сообщение от пользователя\n\n"
-            f"Имя: {user.full_name}\n"
+            f"👤 Имя: {user.full_name}\n"
             f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
             f"🆔 ID: {user.id}\n\n"
             f"📝 Сообщение:\n{text}"
@@ -359,7 +360,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             blocked = is_blocked(int(uid))
             
             app_text = (
-                f"Имя: {app.get('name', '—')}\n"
+                f"👤 Имя: {app.get('name', '—')}\n"
                 f"👨‍💻 Ник: @{app.get('username', '—')}\n"
                 f"🆔 ID: {uid}\n"
                 f"🏠 Квартира: {app.get('flat', '—')}\n"
@@ -413,11 +414,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         
         await update.message.reply_text(stats_text)
-        return
-    
-    if text == "🔄 Очистить старые":
-        cleaned = cleanup_old_apps()
-        await update.message.reply_text(f"🧹 Удалено старых заявок: {cleaned}")
         return
     
     if text == "📦 Экспорт JSON":
@@ -481,8 +477,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if save_json(APPS_FILE, apps):
         # Уведомляем администраторов
         app_info = (
-            f"Новая заявка:\n\n"
-            f"Имя: {user.full_name}\n"
+            f"🆕 Новая заявка:\n\n"
+            f"👤 Имя: {user.full_name}\n"
             f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
             f"🆔 ID: {user.id}\n"
             f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
@@ -529,8 +525,8 @@ async def handle_user_callback(query, context, data, user):
         
         # Уведомляем администраторов
         app_info = (
-            f"Новая заявка:\n\n"
-            f"Имя: {u.full_name}\n"
+            f"🆕 Новая заявка:\n\n"
+            f"👤 Имя: {u.full_name}\n"
             f"👨‍💻 Ник: @{u.username if u.username else '—'}\n"
             f"🆔 ID: {u.id}\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
@@ -563,74 +559,88 @@ async def handle_admin_callback(query, context, data, user):
         await query.edit_message_text("❌ У вас нет прав для этого действия.")
         return
     
-    if ":" not in data:
-        # Обработка шаблонов причин отклонения
-        if data == "reject_custom":
-            await query.edit_message_text("✏️ Введите свою причину отклонения:")
-            context.chat_data["rejecting_app"] = context.chat_data.get("pending_reject_app")
-            return
-        else:
-            await query.edit_message_text("❌ Неверный формат команды.")
-            return
-    
-    action, target_id = data.split(":", 1)
+    # Проверяем формат callback_data
+    if not data:
+        await query.edit_message_text("❌ Неверный формат команды.")
+        return
     
     # Обработка шаблонов причин отклонения
-    if action == "reject_template":
-        app_id = context.chat_data.get("pending_reject_app")
-        if app_id:
-            await process_rejection(context, app_id, target_id, query)
-        return
-    
-    apps = load_json(APPS_FILE, {})
-    blacklist = load_json(BLACKLIST_FILE, [])
-    target_id_int = int(target_id)
-    
-    if action == "block":
-        if target_id_int not in blacklist:
-            blacklist.append(target_id_int)
-            save_json(BLACKLIST_FILE, blacklist)
-        await query.edit_message_text("🚫 Пользователь заблокирован.")
-        return
-    
-    if action == "unblock":
-        if target_id_int in blacklist:
-            blacklist.remove(target_id_int)
-            save_json(BLACKLIST_FILE, blacklist)
-        await query.edit_message_text("🔓 Пользователь разблокирован.")
-        return
-    
-    if action == "approve":
-        if target_id in apps:
-            apps[target_id]["status"] = STATUS_TEXT["approved"]
-            save_json(APPS_FILE, apps)
+    if data.startswith("reject_template_"):
+        # Формат: reject_template_<app_id>_<hash>
+        parts = data.split("_")
+        if len(parts) >= 3:
+            app_id = parts[2]
+            # Находим соответствующий шаблон
+            template_text = None
+            for template in REJECT_TEMPLATES:
+                if str(hash(template) % 10000) == parts[3]:
+                    template_text = template
+                    break
             
-            try:
-                await context.bot.send_message(
-                    target_id_int,
-                    "✅ Ваша заявка одобрена!"
+            if template_text and app_id:
+                await process_rejection(context, app_id, template_text, query)
+                return
+    
+    # Обработка обычных действий с :
+    if ":" in data:
+        action, target_id = data.split(":", 1)
+        
+        apps = load_json(APPS_FILE, {})
+        blacklist = load_json(BLACKLIST_FILE, [])
+        target_id_int = int(target_id)
+        
+        if action == "block":
+            if target_id_int not in blacklist:
+                blacklist.append(target_id_int)
+                save_json(BLACKLIST_FILE, blacklist)
+            await query.edit_message_text("🚫 Пользователь заблокирован.")
+            return
+        
+        if action == "unblock":
+            if target_id_int in blacklist:
+                blacklist.remove(target_id_int)
+                save_json(BLACKLIST_FILE, blacklist)
+            await query.edit_message_text("🔓 Пользователь разблокирован.")
+            return
+        
+        if action == "approve":
+            if target_id in apps:
+                apps[target_id]["status"] = STATUS_TEXT["approved"]
+                save_json(APPS_FILE, apps)
+                
+                try:
+                    await context.bot.send_message(
+                        target_id_int,
+                        "✅ Ваша заявка одобрена!"
+                    )
+                except:
+                    pass
+                
+                await query.edit_message_text("✅ Заявка одобрена.")
+            return
+        
+        if action == "reject":
+            if target_id in apps:
+                # Сохраняем ID заявки для отклонения
+                context.chat_data["pending_reject_app"] = target_id
+                # Показываем шаблоны причин
+                await query.edit_message_text(
+                    "📝 Выберите причину отклонения:",
+                    reply_markup=create_reject_templates_keyboard(target_id)
                 )
-            except:
-                pass
-            
-            await query.edit_message_text("✅ Заявка одобрена.")
-        return
+            return
+        
+        if action == "reply":
+            context.chat_data["replying_to"] = target_id
+            await query.edit_message_text("✉️ Введите ответ для пользователя:")
+            return
+        
+        if action == "reject_custom":
+            context.chat_data["rejecting_app"] = target_id
+            await query.edit_message_text("✏️ Введите свою причину отклонения:")
+            return
     
-    if action == "reject":
-        if target_id in apps:
-            # Сохраняем ID заявки для отклонения
-            context.chat_data["pending_reject_app"] = target_id
-            # Показываем шаблоны причин
-            await query.edit_message_text(
-                "📝 Выберите причину отклонения:",
-                reply_markup=create_reject_templates_keyboard()
-            )
-        return
-    
-    if action == "reply":
-        context.chat_data["replying_to"] = target_id
-        await query.edit_message_text("✉️ Введите ответ для пользователя:")
-        return
+    await query.edit_message_text("❌ Неизвестная команда.")
 
 async def process_rejection(context, app_id, reason, query=None):
     """Обработка отклонения заявки"""
@@ -739,12 +749,11 @@ def main() -> None:
     try:
         app.run_polling(
             drop_pending_updates=True,
-            close_loop=False,  # Важно для Render
+            close_loop=False,
             allowed_updates=Update.ALL_TYPES
         )
     except Exception as e:
         logger.error(f"Ошибка запуска бота: {e}")
-        # Ждем 5 секунд и пробуем снова
         import time
         time.sleep(5)
         app.run_polling(
