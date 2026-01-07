@@ -169,7 +169,8 @@ USER_MENU = ReplyKeyboardMarkup(
 ADMIN_MENU = ReplyKeyboardMarkup(
     [
         ["📋 Список заявок", "📊 Статистика"],
-        ["🔄 Очистить старые", "📦 Экспорт JSON"]
+        ["🔄 Очистить старые", "📦 Экспорт JSON"],
+        ["🔄 Перезагрузить бота"]
     ],
     resize_keyboard=True
 )
@@ -288,7 +289,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"✉️ Сообщение от пользователя\n\n"
             f"Имя: {user.full_name}\n"
             f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
-            f"ID: {user.id}\n\n"
+            f"🆔 ID: {user.id}\n\n"
             f"📝 Сообщение:\n{text}"
         )
         
@@ -360,7 +361,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             app_text = (
                 f"Имя: {app.get('name', '—')}\n"
                 f"👨‍💻 Ник: @{app.get('username', '—')}\n"
-                f"ID: {uid}\n"
+                f"🆔 ID: {uid}\n"
                 f"🏠 Квартира: {app.get('flat', '—')}\n"
                 f"📌 Статус: {app.get('status', '—')}\n"
             )
@@ -427,6 +428,12 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 filename="applications.json"
             )
         return
+    
+    if text == "🔄 Перезагрузить бота":
+        await update.message.reply_text("🔄 Перезагружаю бота...")
+        # Перезапуск через остановку и запуск
+        import sys
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик файлов"""
@@ -474,10 +481,10 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if save_json(APPS_FILE, apps):
         # Уведомляем администраторов
         app_info = (
-            f"Заявка:\n\n"
+            f"Новая заявка:\n\n"
             f"Имя: {user.full_name}\n"
             f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
-            f"ID: {user.id}\n"
+            f"🆔 ID: {user.id}\n"
             f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
         )
         
@@ -522,10 +529,10 @@ async def handle_user_callback(query, context, data, user):
         
         # Уведомляем администраторов
         app_info = (
-            f"Заявка:\n\n"
+            f"Новая заявка:\n\n"
             f"Имя: {u.full_name}\n"
             f"👨‍💻 Ник: @{u.username if u.username else '—'}\n"
-            f"ID: {u.id}\n"
+            f"🆔 ID: {u.id}\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
             f"📄 Кадастр:\n```\n{context.user_data['cad']}\n```"
         )
@@ -707,7 +714,7 @@ def main() -> None:
     
     ensure_dirs()
     
-    # Создаем приложение для версии 22.3.0
+    # Создаем приложение с обработкой конфликтов
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики
@@ -727,7 +734,24 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
     
     logger.info(f"Бот версии {BOT_VERSION} запускается...")
-    app.run_polling(drop_pending_updates=True)
+    
+    # Запуск с обработкой конфликтов
+    try:
+        app.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,  # Важно для Render
+            allowed_updates=Update.ALL_TYPES
+        )
+    except Exception as e:
+        logger.error(f"Ошибка запуска бота: {e}")
+        # Ждем 5 секунд и пробуем снова
+        import time
+        time.sleep(5)
+        app.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            allowed_updates=Update.ALL_TYPES
+        )
 
 if __name__ == "__main__":
     main()
