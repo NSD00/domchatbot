@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
@@ -27,6 +26,8 @@ if not ADMINS:
 DATA_DIR = "data"
 TEMP_DIR = "temp/files"
 APPLICATIONS_FILE = f"{DATA_DIR}/applications.json"
+DIALOGS_FILE = f"{DATA_DIR}/dialogs.json"
+STATS_FILE = f"{DATA_DIR}/stats.json"
 
 APPLICATION_TTL_DAYS = 7
 
@@ -94,7 +95,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["step"] = "flat"
 
-    await update.message.reply_text("🏠 Верификация для домового чата\n\nВведите номер квартиры:")
+    await update.message.reply_text(
+        "🏠 Верификация для домового чата\n\nВведите номер квартиры:"
+    )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     apps = load_json(APPLICATIONS_FILE, {})
@@ -104,7 +107,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Заявка не найдена.")
         return
 
-    await update.message.reply_text(f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"📄 Статус заявки: **{app['status']}**", parse_mode="Markdown"
+    )
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -115,7 +120,9 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✉️ Напишите сообщение, я передам его администратору.")
+    await update.message.reply_text(
+        "✉️ Напишите сообщение, я передам его администратору."
+    )
     context.user_data["step"] = "contact_admin"
 
 # ================== ОБРАБОТКА СООБЩЕНИЙ ==================
@@ -127,13 +134,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == "flat":
         context.user_data["flat"] = update.message.text.strip()
         context.user_data["step"] = "cadastre"
-        await update.message.reply_text("Введите кадастровый номер\nили отправьте фото / PDF документа:")
+        await update.message.reply_text(
+            "Введите кадастровый номер или отправьте фото / PDF документа:"
+        )
         return
 
     if step == "cadastre":
         text = update.message.text
         normalized = normalize_cadastre(text)
-
         if not normalized:
             await update.message.reply_text("❌ Не удалось распознать номер. Попробуйте ещё раз.")
             return
@@ -142,14 +150,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["cadastre_norm"] = normalized
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да", callback_data="cad_ok"), InlineKeyboardButton("❌ Нет", callback_data="cad_no")]
+            [InlineKeyboardButton("✅ Да", callback_data="cad_ok"),
+             InlineKeyboardButton("❌ Нет", callback_data="cad_no")]
         ])
-
-        await update.message.reply_text(f"Получилось так:\n`{normalized}`\n\nВерно?", reply_markup=keyboard, parse_mode="Markdown")
+        await update.message.reply_text(
+            f"Получилось так:\n`{normalized}`\n\nВерно?",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        return
 
     if step == "contact_admin":
         for admin in ADMINS:
-            await context.bot.send_message(admin, f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}")
+            await context.bot.send_message(
+                admin,
+                f"✉️ Сообщение от пользователя {user_id}:\n\n{update.message.text}"
+            )
         await update.message.reply_text("✅ Сообщение отправлено.")
         context.user_data.clear()
 
@@ -173,7 +189,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     path = f"{TEMP_DIR}/{file.file_id}.{ext}"
     await tg_file.download_to_drive(path)
 
-    context.user_data.setdefault("files", []).append({"file_id": file.file_id, "path": path, "type": ext})
+    context.user_data.setdefault("files", []).append({
+        "file_id": file.file_id,
+        "path": path,
+        "type": ext
+    })
+
     await update.message.reply_text("📎 Файл принят. Заявка отправляется админу.")
     await submit_application(update, context)
 
@@ -182,7 +203,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
 
     if query.data == "cad_ok":
@@ -190,25 +210,29 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cad_no":
         context.user_data["step"] = "cadastre"
         await query.edit_message_text("Введите номер ещё раз.")
-    elif query.data.startswith("admin_") and is_admin(user_id):
+    elif query.data.startswith("admin_"):
+        if not is_admin(user_id):
+            return
+
         action, target_id = query.data.split(":")
         apps = load_json(APPLICATIONS_FILE, {})
-        app_data = apps.get(target_id)
-        if not app_data or app_data["status"] != "pending":
+        app = apps.get(target_id)
+        if not app or app["status"] != "pending":
             await query.edit_message_text("⚠️ Заявка уже обработана.")
             return
 
         if action == "admin_approve":
-            app_data["status"] = "approved"
-            app_data["processed_by"] = user_id
-            await context.bot.send_message(int(target_id), "✅ Ваша заявка одобрена.")
-        elif action == "admin_reject":
-            app_data["status"] = "rejected"
-            app_data["processed_by"] = user_id
+            app["status"] = "approved"
+            app["processed_by"] = user_id
+            await context.bot.send_message(int(target_id), "✅ Ваша заявка одобрена. Ссылка у администратора.")
+
+        if action == "admin_reject":
+            app["status"] = "rejected"
+            app["processed_by"] = user_id
             await context.bot.send_message(int(target_id), "❌ Заявка отклонена.")
 
         save_json(APPLICATIONS_FILE, apps)
-        await query.edit_message_text("✔️ Решение принято.")
+        await query.edit_message_text(f"✔️ Решение принято администратором {user_id}")
 
 # ================== ОТПРАВКА ЗАЯВКИ ==================
 
@@ -225,7 +249,6 @@ async def submit_application(source, context):
         "status": "pending",
         "created_at": datetime.utcnow().isoformat(),
     }
-
     save_json(APPLICATIONS_FILE, apps)
 
     for admin in ADMINS:
@@ -233,9 +256,11 @@ async def submit_application(source, context):
             [InlineKeyboardButton("✅ Принять", callback_data=f"admin_approve:{user_id}"),
              InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_reject:{user_id}")]
         ])
-        await context.bot.send_message(admin,
-                                       f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
-                                       reply_markup=keyboard)
+        await context.bot.send_message(
+            admin,
+            f"🆕 Новая заявка\n\n👤 Пользователь: {user_id}\n🏠 Квартира: {apps[str(user_id)]['flat']}\n📄 Кадастр: {apps[str(user_id)]['cadastre_normalized']}",
+            reply_markup=keyboard
+        )
 
     if hasattr(source, "edit_message_text"):
         await source.edit_message_text("⏳ Заявка отправлена.")
