@@ -1,4 +1,4 @@
-﻿import os
+import os
 import json
 import logging
 from datetime import datetime, timedelta
@@ -19,12 +19,13 @@ from telegram.ext import (
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = "PASTE_BOT_TOKEN_HERE"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
-ADMINS = [
-    5546945332,  # ID админа 1
-#    222222222,  # ID админа 2
-]
+ADMINS = [int(x) for x in os.getenv("ADMINS", "").split(",") if x]
+if not ADMINS:
+    raise RuntimeError("ADMINS is not set in environment variables")
 
 DATA_DIR = "data"
 TEMP_DIR = "temp/files"
@@ -64,11 +65,12 @@ def normalize_cadastre(text: str):
     digits = "".join(ch for ch in text if ch.isdigit())
     if len(digits) < 12:
         return None
-    parts = []
-    parts.append(digits[0:2])
-    parts.append(digits[2:4])
-    parts.append(digits[4:-3])
-    parts.append(digits[-3:])
+    parts = [
+        digits[0:2],
+        digits[2:4],
+        digits[4:-3],
+        digits[-3:]
+    ]
     return ":".join(parts)
 
 def cleanup_old_applications():
@@ -79,7 +81,6 @@ def cleanup_old_applications():
     for uid in list(apps.keys()):
         created = datetime.fromisoformat(apps[uid]["created_at"])
         if now - created > timedelta(days=APPLICATION_TTL_DAYS):
-            # удаляем файлы
             for f in apps[uid].get("files", []):
                 try:
                     os.remove(f["path"])
@@ -174,7 +175,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard,
             parse_mode="Markdown"
         )
-        return
 
     if step == "contact_admin":
         for admin in ADMINS:
@@ -244,23 +244,15 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "admin_approve":
             app["status"] = "approved"
             app["processed_by"] = user_id
-
-            await context.bot.send_message(
-                int(target_id),
-                "✅ Ваша заявка одобрена. Ссылка на чат у администратора."
-            )
+            await context.bot.send_message(int(target_id), "✅ Ваша заявка одобрена.")
 
         if action == "admin_reject":
             app["status"] = "rejected"
             app["processed_by"] = user_id
-
-            await context.bot.send_message(
-                int(target_id),
-                "❌ Заявка отклонена."
-            )
+            await context.bot.send_message(int(target_id), "❌ Заявка отклонена.")
 
         save_json(APPLICATIONS_FILE, apps)
-        await query.edit_message_text(f"✔️ Решение принято администратором {user_id}")
+        await query.edit_message_text("✔️ Решение принято.")
 
 # ================== ОТПРАВКА ЗАЯВКИ ==================
 
@@ -325,7 +317,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
