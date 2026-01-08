@@ -683,7 +683,14 @@ async def handle_admin_callback(query, context, data, user):
                 blacklist.append(target_id_int)
                 save_json(BLACKLIST_FILE, blacklist)
                 # Визуальное подтверждение
-                await query.edit_message_text("✅ *Пользователь заблокирован.*", parse_mode="Markdown")
+                try:
+                    await query.edit_message_text("✅ *Пользователь заблокирован.*", parse_mode="Markdown")
+                except:
+                    await context.bot.send_message(
+                        user.id,
+                        "✅ *Пользователь заблокирован.*",
+                        parse_mode="Markdown"
+                    )
                 # Уведомляем пользователя
                 try:
                     await context.bot.send_message(
@@ -695,16 +702,29 @@ async def handle_admin_callback(query, context, data, user):
                 except:
                     pass
             else:
-                await query.edit_message_text("⚠️ Пользователь уже заблокирован.")
+                try:
+                    await query.edit_message_text("⚠️ Пользователь уже заблокирован.")
+                except:
+                    await context.bot.send_message(user.id, "⚠️ Пользователь уже заблокирован.")
             return
         
         if action == "unblock":
             if target_id_int in blacklist:
                 blacklist.remove(target_id_int)
                 save_json(BLACKLIST_FILE, blacklist)
-                await query.edit_message_text("✅ *Пользователь разблокирован.*", parse_mode="Markdown")
+                try:
+                    await query.edit_message_text("✅ *Пользователь разблокирован.*", parse_mode="Markdown")
+                except:
+                    await context.bot.send_message(
+                        user.id,
+                        "✅ *Пользователь разблокирован.*",
+                        parse_mode="Markdown"
+                    )
             else:
-                await query.edit_message_text("⚠️ Пользователь не был заблокирован.")
+                try:
+                    await query.edit_message_text("⚠️ Пользователь не был заблокирован.")
+                except:
+                    await context.bot.send_message(user.id, "⚠️ Пользователь не был заблокирован.")
             return
         
         if action == "approve":
@@ -721,7 +741,14 @@ async def handle_admin_callback(query, context, data, user):
                 except:
                     pass
                 
-                await query.edit_message_text("✅ *Заявка одобрена.*", parse_mode="Markdown")
+                try:
+                    await query.edit_message_text("✅ *Заявка одобрена.*", parse_mode="Markdown")
+                except:
+                    await context.bot.send_message(
+                        user.id,
+                        "✅ *Заявка одобрена.*",
+                        parse_mode="Markdown"
+                    )
             return
         
         if action == "reject":
@@ -729,21 +756,45 @@ async def handle_admin_callback(query, context, data, user):
                 # Сохраняем ID заявки для отклонения
                 context.chat_data["pending_reject_app"] = target_id
                 # Показываем шаблоны причин
-                await query.edit_message_text(
-                    "📝 *Выберите причину отклонения:*",
-                    parse_mode="Markdown",
-                    reply_markup=create_reject_templates_keyboard(target_id)
-                )
+                try:
+                    await query.edit_message_text(
+                        "📝 *Выберите причину отклонения:*",
+                        parse_mode="Markdown",
+                        reply_markup=create_reject_templates_keyboard(target_id)
+                    )
+                except:
+                    # Если не удалось отредактировать сообщение (например, под фото)
+                    await context.bot.send_message(
+                        user.id,
+                        "📝 *Выберите причину отклонения:*",
+                        parse_mode="Markdown",
+                        reply_markup=create_reject_templates_keyboard(target_id)
+                    )
             return
         
         if action == "reply":
             context.chat_data["replying_to"] = target_id
-            await query.edit_message_text("✉️ *Введите ответ для пользователя:*", parse_mode="Markdown")
+            try:
+                await query.edit_message_text("✉️ *Введите ответ для пользователя:*", parse_mode="Markdown")
+            except:
+                # Если не удалось отредактировать сообщение (например, под фото)
+                await context.bot.send_message(
+                    user.id,
+                    "✉️ *Введите ответ для пользователя:*",
+                    parse_mode="Markdown"
+                )
             return
         
         if action == "reject_custom":
             context.chat_data["rejecting_app"] = target_id
-            await query.edit_message_text("✏️ *Введите свою причину отклонения:*", parse_mode="Markdown")
+            try:
+                await query.edit_message_text("✏️ *Введите свою причину отклонения:*", parse_mode="Markdown")
+            except:
+                await context.bot.send_message(
+                    user.id,
+                    "✏️ *Введите свою причину отклонения:*",
+                    parse_mode="Markdown"
+                )
             return
     
     await query.edit_message_text("❌ Неизвестная команда.")
@@ -770,7 +821,14 @@ async def process_rejection(context, app_id, reason, query=None):
             pass
         
         if query:
-            await query.edit_message_text(f"✅ *Заявка отклонена.*\nПричина: {reason}", parse_mode="Markdown")
+            try:
+                await query.edit_message_text(f"✅ *Заявка отклонена.*\nПричина: {reason}", parse_mode="Markdown")
+            except:
+                await context.bot.send_message(
+                    query.from_user.id,
+                    f"✅ *Заявка отклонена.*\nПричина: {reason}",
+                    parse_mode="Markdown"
+                )
         
         # Очищаем контекст
         context.chat_data.pop("pending_reject_app", None)
