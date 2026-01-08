@@ -3,12 +3,12 @@ import json
 import logging
 import pathlib
 import re
-import signal
-import sys
+import threading
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
-from flask import Flask, request
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -952,52 +952,55 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ПРОСТОЙ ВЕБ-СЕРВЕР ==================
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    """Простой эндпоинт для проверки работы бота"""
-    return {
-        "status": "bot_running",
-        "version": BOT_VERSION,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-@app.route('/health')
-def health():
-    """Эндпоинт для health check (используется Render для проверки)"""
-    return {
-        "status": "healthy",
-        "version": BOT_VERSION,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }, 200
-
-@app.route('/stats')
-def stats():
-    """Статистика бота"""
-    apps = load_json(APPS_FILE, {})
-    total = len(apps)
-    pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
-    approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
-    rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
+# ================== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTH CHECK ==================
+def run_simple_http_server():
+    """Запускает простой HTTP сервер для health check"""
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    import socket
     
-    return {
-        "applications": {
-            "total": total,
-            "pending": pending,
-            "approved": approved,
-            "rejected": rejected
-        },
-        "bot": {
-            "version": BOT_VERSION,
-            "admins_count": len(ADMINS)
-        }
-    }
+    class HealthCheckHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health':
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                response = json.dumps({
+                    "status": "healthy",
+                    "bot_version": BOT_VERSION,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                self.wfile.write(response.encode())
+            else:
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                response = json.dumps({
+                    "status": "bot_running",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                })
+                self.wfile.write(response.encode())
+        
+        def log_message(self, format, *args):
+            # Отключаем логирование HTTP запросов
+            pass
+    
+    port = int(os.getenv("PORT", 10000))
+    
+    # Пробуем разные порты, если основной занят
+    for p in range(port, port + 10):
+        try:
+            server = HTTPServer(('0.0.0.0', p), HealthCheckHandler)
+            logger.info(f"HTTP сервер запущен на порту {p}")
+            server.serve_forever()
+        except OSError as e:
+            if "Address already in use" in str(e):
+                continue
+            else:
+                raise
 
 # ================== ЗАПУСК БОТА ==================
-async def main():
-    """Асинхронный запуск бота"""
+async def run_bot():
+    """Запускает Telegram бота"""
     if not BOT_TOKEN:
         logger.error("Токен бота не установлен!")
         return
@@ -1029,22 +1032,9 @@ async def main():
         allowed_updates=Update.ALL_TYPES
     )
 
-def signal_handler(signum, frame):
-    """Обработчик сигналов для корректного завершения"""
-    logger.info(f"Получен сигнал {signum}, завершаем работу...")
-    sys.exit(0)
-
-def run_app():
-    """Запускает Flask приложение"""
-    port = int(os.getenv("PORT", 10000))
-    logger.info(f"Запуск веб-сервера на порту {port}")
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
-
-# ================== ГЛАВНАЯ ФУНКЦИЯ ==================
-if __name__ == "__main__":
-    # Настраиваем обработчики сигналов
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+def main():
+    """Основная функция запуска"""
+    import sys
     
     # Проверяем обязательные переменные окружения
     if not BOT_TOKEN:
@@ -1054,11 +1044,20 @@ if __name__ == "__main__":
     if not ADMINS:
         logger.warning("Предупреждение: ADMINS не установлен, админские функции не будут доступны")
     
-    # Проверяем, если есть аргумент командной строки '--web'
-    # Это позволит Render запускать веб-сервер отдельно
-    if len(sys.argv) > 1 and sys.argv[1] == '--web':
-        run_app()
+    # Если есть флаг --health, запускаем только health check сервер
+    if len(sys.argv) > 1 and sys.argv[1] == '--health':
+        run_simple_http_server()
     else:
-        # Запускаем бота (основной режим)
-        import asyncio
-        asyncio.run(main())
+        # Запускаем и бота, и HTTP сервер в разных потоках
+        import threading
+        
+        # Запускаем HTTP сервер в отдельном потоке
+        http_thread = threading.Thread(target=run_simple_http_server, daemon=True)
+        http_thread.start()
+        logger.info("HTTP сервер для health check запущен в фоновом потоке")
+        
+        # Запускаем бота в основном потоке
+        asyncio.run(run_bot())
+
+if __name__ == "__main__":
+    main()
