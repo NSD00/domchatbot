@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.4"
+BOT_VERSION = "1.1.5"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -428,7 +428,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             
             if app.get("cadastre"):
-                app_text += f"\n📄 Кадастр:\n```\n{app['cadastre']}\n```\n"
+                app_text += f"\n📄 Кадастр:\n```{app['cadastre']}```\n"
             
             if blocked:
                 app_text += "\n🚫 *Заблокирован*"
@@ -542,9 +542,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     }
     
     if save_json(APPS_FILE, apps):
-        # Уведомляем администраторов - ОТПРАВЛЯЕМ ФАЙЛ
-        app_info = (
-            f"🆕 *Новая заявка (файл):*\n\n"
+        # ========== ВАРИАНТ 1: Без переносов строк в блоке кода ==========
+        app_info_1 = (
+            f"🆕 *Новая заявка (файл) - Вариант 1:*\n\n"
             f"👤 Имя: {user.full_name}\n"
             f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
             f"🆔 ID: {user.id}\n"
@@ -552,16 +552,41 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         
         if context.user_data.get("cad"):
-            app_info += f"\n📄 Кадастр:\n```\n{context.user_data['cad']}\n```\n"
+            app_info_1 += f"\n📄 Кадастр:\n```{context.user_data['cad']}```\n"
         
+        # ========== ВАРИАНТ 2: Inline code (две кавычки) ==========
+        app_info_2 = (
+            f"🆕 *Новая заявка (файл) - Вариант 2:*\n\n"
+            f"👤 Имя: {user.full_name}\n"
+            f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
+            f"🆔 ID: {user.id}\n"
+            f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
+        )
+        
+        if context.user_data.get("cad"):
+            app_info_2 += f"\n📄 Кадастр: `{context.user_data['cad']}`\n"
+        
+        # ========== ВАРИАНТ 3: Просто текст ==========
+        app_info_3 = (
+            f"🆕 *Новая заявка (файл) - Вариант 3:*\n\n"
+            f"👤 Имя: {user.full_name}\n"
+            f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
+            f"🆔 ID: {user.id}\n"
+            f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
+        )
+        
+        if context.user_data.get("cad"):
+            app_info_3 += f"\n📄 Кадастр:\n{context.user_data['cad']}\n"
+        
+        # Отправляем все три варианта администраторам
         for admin_id in ADMINS:
             try:
-                # Отправляем файл администратору
+                # Отправляем файл с первым вариантом
                 if file_type == "photo":
                     await context.bot.send_photo(
                         admin_id,
                         photo=open(file_path, "rb"),
-                        caption=app_info,
+                        caption=app_info_1,
                         parse_mode="Markdown",
                         reply_markup=create_admin_buttons(str(user.id), False)
                     )
@@ -569,22 +594,26 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     await context.bot.send_document(
                         admin_id,
                         document=open(file_path, "rb"),
-                        caption=app_info,
+                        caption=app_info_1,
                         parse_mode="Markdown",
                         reply_markup=create_admin_buttons(str(user.id), False)
                     )
+                
+                # Отправляем остальные варианты как отдельные сообщения
+                await context.bot.send_message(
+                    admin_id,
+                    app_info_2,
+                    parse_mode="Markdown"
+                )
+                
+                await context.bot.send_message(
+                    admin_id,
+                    app_info_3,
+                    parse_mode="Markdown"
+                )
+                
             except Exception as e:
-                logger.error(f"Ошибка отправки файла админу {admin_id}: {e}")
-                # Если не удалось отправить файл, отправляем текстовое сообщение
-                try:
-                    await context.bot.send_message(
-                        admin_id,
-                        app_info + f"\n📎 Файл не отправлен: {e}",
-                        parse_mode="Markdown",
-                        reply_markup=create_admin_buttons(str(user.id), False)
-                    )
-                except:
-                    pass
+                logger.error(f"Ошибка отправки админу {admin_id}: {e}")
         
         context.user_data.clear()
         await update.message.reply_text(
@@ -612,24 +641,58 @@ async def handle_user_callback(query, context, data, user):
         }
         save_json(APPS_FILE, apps)
         
-        # Уведомляем администраторов
-        app_info = (
-            f"🆕 *Новая заявка:*\n\n"
+        # ========== ВАРИАНТ 1: Без переносов строк в блоке кода ==========
+        app_info_1 = (
+            f"🆕 *Новая заявка - Вариант 1:*\n\n"
             f"👤 Имя: {u.full_name}\n"
             f"👨‍💻 Ник: @{u.username if u.username else '—'}\n"
             f"🆔 ID: {u.id}\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
-            f"📄 Кадастр:\n```\n{context.user_data['cad']}\n```"
+            f"📄 Кадастр:\n```{context.user_data['cad']}```"
+        )
+        
+        # ========== ВАРИАНТ 2: Inline code (две кавычки) ==========
+        app_info_2 = (
+            f"🆕 *Новая заявка - Вариант 2:*\n\n"
+            f"👤 Имя: {u.full_name}\n"
+            f"👨‍💻 Ник: @{u.username if u.username else '—'}\n"
+            f"🆔 ID: {u.id}\n"
+            f"🏠 Квартира: {context.user_data['flat']}\n"
+            f"📄 Кадастр: `{context.user_data['cad']}`"
+        )
+        
+        # ========== ВАРИАНТ 3: Просто текст ==========
+        app_info_3 = (
+            f"🆕 *Новая заявка - Вариант 3:*\n\n"
+            f"👤 Имя: {u.full_name}\n"
+            f"👨‍💻 Ник: @{u.username if u.username else '—'}\n"
+            f"🆔 ID: {u.id}\n"
+            f"🏠 Квартира: {context.user_data['flat']}\n"
+            f"📄 Кадастр:\n{context.user_data['cad']}"
         )
         
         for admin_id in ADMINS:
             try:
+                # Отправляем все три варианта
                 await context.bot.send_message(
                     admin_id,
-                    app_info,
+                    app_info_1,
                     parse_mode="Markdown",
                     reply_markup=create_admin_buttons(str(u.id), False)
                 )
+                
+                await context.bot.send_message(
+                    admin_id,
+                    app_info_2,
+                    parse_mode="Markdown"
+                )
+                
+                await context.bot.send_message(
+                    admin_id,
+                    app_info_3,
+                    parse_mode="Markdown"
+                )
+                
             except:
                 pass
         
@@ -641,6 +704,10 @@ async def handle_user_callback(query, context, data, user):
         context.user_data.pop("cad", None)
         await query.edit_message_text("*Введите кадастровый номер заново:*", parse_mode="Markdown")
         return
+
+# [Остальной код остается без изменений...]
+# handle_admin_callback, process_rejection, handle_callback, handle_admin_reply, main
+# ... (остальной код такой же, как в предыдущей версии)
 
 async def handle_admin_callback(query, context, data, user):
     """Обработка callback'ов от администраторов"""
