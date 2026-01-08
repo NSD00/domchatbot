@@ -3,14 +3,12 @@ import json
 import logging
 import pathlib
 import re
-import threading
-import time
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
-from flask import Flask
+from flask import Flask, request
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -954,96 +952,113 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ВЕБ-СЕРВЕР ==================
-def create_flask_app():
-    """Создает Flask приложение для веб-сервера"""
-    flask_app = Flask(__name__)
-    
-    @flask_app.route('/')
-    def home():
-        return {"status": "bot_running", "timestamp": datetime.now(timezone.utc).isoformat()}
-    
-    @flask_app.route('/health')
-    def health():
-        return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}, 200
-    
-    return flask_app
+# ================== ПРОСТОЙ ВЕБ-СЕРВЕР ==================
+app = Flask(__name__)
 
-def run_webserver():
-    """Запускает Flask веб-сервер"""
-    flask_app = create_flask_app()
-    port = int(os.getenv("PORT", 10000))
-    logger.info(f"Запуск веб-сервера на порту {port}")
+@app.route('/')
+def home():
+    """Простой эндпоинт для проверки работы бота"""
+    return {
+        "status": "bot_running",
+        "version": BOT_VERSION,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.route('/health')
+def health():
+    """Эндпоинт для health check (используется Render для проверки)"""
+    return {
+        "status": "healthy",
+        "version": BOT_VERSION,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }, 200
+
+@app.route('/stats')
+def stats():
+    """Статистика бота"""
+    apps = load_json(APPS_FILE, {})
+    total = len(apps)
+    pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
+    approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
+    rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
     
-    # Используем production WSGI сервер
-    from waitress import serve
-    serve(flask_app, host="0.0.0.0", port=port, threads=4)
+    return {
+        "applications": {
+            "total": total,
+            "pending": pending,
+            "approved": approved,
+            "rejected": rejected
+        },
+        "bot": {
+            "version": BOT_VERSION,
+            "admins_count": len(ADMINS)
+        }
+    }
 
 # ================== ЗАПУСК БОТА ==================
-def run_bot():
-    """Запускает Telegram бота"""
-    import asyncio
+async def main():
+    """Асинхронный запуск бота"""
+    if not BOT_TOKEN:
+        logger.error("Токен бота не установлен!")
+        return
     
-    # Устанавливаем политику event loop для Python 3.13
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    ensure_dirs()
     
-    async def main():
-        """Асинхронный запуск бота"""
-        if not BOT_TOKEN:
-            logger.error("Токен бота не установлен!")
-            return
-        
-        ensure_dirs()
-        
-        # Создаем приложение
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Регистрируем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(handle_callback))
-        application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
-        
-        async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            user = update.effective_user
-            if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
-                await handle_admin_reply(update, context)
-        
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
-        
-        logger.info(f"Бот версии {BOT_VERSION} запускается...")
-        
-        # Запускаем бота
-        await application.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            allowed_updates=Update.ALL_TYPES
-        )
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    # Запускаем асинхронно
-    asyncio.run(main())
+    # Регистрируем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+    
+    async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
+            await handle_admin_reply(update, context)
+    
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
+    
+    logger.info(f"Бот версии {BOT_VERSION} запускается...")
+    
+    # Запускаем бота
+    await application.run_polling(
+        drop_pending_updates=True,
+        close_loop=False,
+        allowed_updates=Update.ALL_TYPES
+    )
+
+def signal_handler(signum, frame):
+    """Обработчик сигналов для корректного завершения"""
+    logger.info(f"Получен сигнал {signum}, завершаем работу...")
+    sys.exit(0)
+
+def run_app():
+    """Запускает Flask приложение"""
+    port = int(os.getenv("PORT", 10000))
+    logger.info(f"Запуск веб-сервера на порту {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
 # ================== ГЛАВНАЯ ФУНКЦИЯ ==================
-def main():
-    """Основная функция запуска"""
+if __name__ == "__main__":
+    # Настраиваем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Проверяем обязательные переменные окружения
     if not BOT_TOKEN:
         logger.error("Ошибка: BOT_TOKEN не установлен!")
-        return
+        sys.exit(1)
     
     if not ADMINS:
         logger.warning("Предупреждение: ADMINS не установлен, админские функции не будут доступны")
     
-    # Запускаем веб-сервер в отдельном процессе (не потоке!)
-    import multiprocessing
-    
-    webserver_process = multiprocessing.Process(target=run_webserver, daemon=True)
-    webserver_process.start()
-    logger.info("Веб-сервер запущен в отдельном процессе")
-    
-    # Запускаем бота в основном процессе
-    run_bot()
-
-if __name__ == "__main__":
-    main()
+    # Проверяем, если есть аргумент командной строки '--web'
+    # Это позволит Render запускать веб-сервер отдельно
+    if len(sys.argv) > 1 and sys.argv[1] == '--web':
+        run_app()
+    else:
+        # Запускаем бота (основной режим)
+        import asyncio
+        asyncio.run(main())
