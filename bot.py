@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.6"  # Увеличиваем версию для обновления
+BOT_VERSION = "1.1.7"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -48,6 +48,14 @@ REJECT_TEMPLATES = [
     "❌ Неверный кадастровый номер",
     "❌ Нечитаемое фото/документ",
     "❌ Несоответствие данных"
+]
+
+# Типовые ответы для администратора
+REPLY_TEMPLATES = [
+    "✅ Заявка будет рассмотрена в течение 24 часов",
+    "📋 Необходимо предоставить дополнительные документы",
+    "🔄 Проверяем информацию, ожидайте",
+    "📞 Свяжемся с вами для уточнения деталей"
 ]
 
 # ================== УТИЛИТЫ ==================
@@ -223,6 +231,18 @@ def create_reject_templates_keyboard(pending_app_id: str) -> InlineKeyboardMarku
         callback_data = f"reject_template_{pending_app_id}_{hash(template) % 10000}"
         buttons.append([InlineKeyboardButton(template, callback_data=callback_data)])
     buttons.append([InlineKeyboardButton("✏️ Своя причина", callback_data=f"reject_custom:{pending_app_id}")])
+    buttons.append([InlineKeyboardButton("↩️ Отмена", callback_data=f"cancel:{pending_app_id}")])
+    return InlineKeyboardMarkup(buttons)
+
+def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup:
+    """Создает клавиатуру с типовыми ответами"""
+    buttons = []
+    for template in REPLY_TEMPLATES:
+        # Используем безопасный формат callback_data
+        callback_data = f"reply_template_{target_user_id}_{hash(template) % 10000}"
+        buttons.append([InlineKeyboardButton(template, callback_data=callback_data)])
+    buttons.append([InlineKeyboardButton("✏️ Свой ответ", callback_data=f"reply_custom:{target_user_id}")])
+    buttons.append([InlineKeyboardButton("↩️ Отмена", callback_data=f"cancel_reply:{target_user_id}")])
     return InlineKeyboardMarkup(buttons)
 
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
@@ -235,7 +255,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text("🚫 Вы заблокированы.")
+        await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
         return
     
     cleanup_old_apps()
@@ -246,8 +266,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"👑 *Административная панель*\n"
             f"🔄 Обновлено до версии: `{BOT_VERSION}`\n\n"
             f"*Что нового:*\n"
-            f"• 📋 Улучшено отображение кадастра\n"
-            f"• 👤 Уточнены уведомления о блокировках\n"
+            f"• 📋 Улучшена структура заявок\n"
+            f"• ✉️ Добавлены типовые ответы\n"
+            f"• ↩️ Кнопки отмены действий\n"
             f"• 🛠 Исправлены мелкие ошибки"
         )
         
@@ -270,7 +291,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text("🚫 Вы заблокированы.")
+        await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
         return
     
     text = update.message.text.strip()
@@ -422,20 +443,28 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         for uid, app in apps.items():
             blocked = is_blocked(int(uid))
             
+            # НОВАЯ СТРУКТУРА: имя, ник, id, квартира, кадастр, статус
             app_text = (
                 f"👤 Имя: {app.get('name', '—')}\n"
                 f"👨‍💻 Ник: @{app.get('username', '—')}\n"
                 f"🆔 ID: {uid}\n"
                 f"🏠 Квартира: {app.get('flat', '—')}\n"
-                f"📌 Статус: {app.get('status', '—')}\n"
             )
             
             if app.get("cadastre"):
                 # Для админа - inline code (две кавычки) для удобного копирования
-                app_text += f"\n📄 Кадастр: `{app['cadastre']}`\n"
+                app_text += f"📄 Кадастр: `{app['cadastre']}`\n\n"
+            else:
+                app_text += "\n"
+            
+            app_text += f"📌 Статус: {app.get('status', '—')}"
+            
+            # Добавляем причину отклонения, если есть
+            if app.get("reject_reason") and app.get("status") == STATUS_TEXT["rejected"]:
+                app_text += f"\n\n*Причина отклонения:*\n{app['reject_reason']}"
             
             if blocked:
-                app_text += "\n⛔ *Заблокирован*"
+                app_text += "\n\n⛔ *Заблокирован*"
             
             if app.get("file") and os.path.exists(app["file"]):
                 try:
@@ -495,7 +524,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text("🚫 Вы заблокированы.")
+        await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
         return
     
     if context.user_data.get("step") != "cad":
@@ -550,10 +579,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
             f"🆔 ID: {user.id}\n"
             f"🏠 Квартира: {context.user_data.get('flat', '—')}\n"
+            f"📄 Кадастр: `{context.user_data.get('cad', '—')}`"
         )
-        
-        if context.user_data.get("cad"):
-            app_info += f"\n📄 Кадастр: `{context.user_data['cad']}`\n"
         
         for admin_id in ADMINS:
             try:
@@ -654,6 +681,23 @@ async def handle_admin_callback(query, context, data, user):
         await query.edit_message_text("❌ Неверный формат команды.")
         return
     
+    # Обработка отмены действий
+    if data.startswith("cancel:"):
+        # Просто возвращаемся назад
+        try:
+            await query.edit_message_text("↩️ Действие отменено.")
+        except:
+            await context.bot.send_message(user.id, "↩️ Действие отменено.")
+        return
+    
+    if data.startswith("cancel_reply:"):
+        # Отмена ответа
+        try:
+            await query.edit_message_text("↩️ Ответ отменен.")
+        except:
+            await context.bot.send_message(user.id, "↩️ Ответ отменен.")
+        return
+    
     # Обработка шаблонов причин отклонения
     if data.startswith("reject_template_"):
         # Формат: reject_template_<app_id>_<hash>
@@ -671,6 +715,42 @@ async def handle_admin_callback(query, context, data, user):
                 await process_rejection(context, app_id, template_text, query)
                 return
     
+    # Обработка типовых ответов
+    if data.startswith("reply_template_"):
+        # Формат: reply_template_<user_id>_<hash>
+        parts = data.split("_")
+        if len(parts) >= 3:
+            target_id = parts[2]
+            # Находим соответствующий шаблон
+            reply_text = None
+            for template in REPLY_TEMPLATES:
+                if str(hash(template) % 10000) == parts[3]:
+                    reply_text = template
+                    break
+            
+            if reply_text and target_id:
+                # Отправляем ответ пользователю
+                try:
+                    await context.bot.send_message(
+                        int(target_id),
+                        f"✉️ *Сообщение от администратора:*\n\n{reply_text}",
+                        parse_mode="Markdown"
+                    )
+                    try:
+                        await query.edit_message_text(f"✅ *Ответ отправлен.*\n\n{reply_text}", parse_mode="Markdown")
+                    except:
+                        await context.bot.send_message(
+                            user.id,
+                            f"✅ *Ответ отправлен.*\n\n{reply_text}",
+                            parse_mode="Markdown"
+                        )
+                except Exception as e:
+                    try:
+                        await query.edit_message_text(f"❌ Не удалось отправить сообщение: {e}")
+                    except:
+                        await context.bot.send_message(user.id, f"❌ Не удалось отправить сообщение: {e}")
+                return
+    
     # Обработка обычных действий с :
     if ":" in data:
         action, target_id = data.split(":", 1)
@@ -681,16 +761,23 @@ async def handle_admin_callback(query, context, data, user):
         
         # Получаем информацию о пользователе для уведомлений
         target_user_info = ""
+        target_user_nick = ""
         if target_id in apps:
             target_user_info = f" ({apps[target_id].get('name', 'ID: ' + target_id)})"
+            target_user_nick = apps[target_id].get('username', '—')
         
         if action == "block":
             if target_id_int not in blacklist:
                 blacklist.append(target_id_int)
                 save_json(BLACKLIST_FILE, blacklist)
                 
-                # Визуальное подтверждение с информацией о пользователе
-                confirmation_text = f"⛔ *Пользователь заблокирован*{target_user_info}"
+                # Визуальное подтверждение с полной информацией о пользователе
+                confirmation_text = (
+                    f"⛔ *Пользователь заблокирован*\n"
+                    f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
+                    f"👨‍💻 Ник: @{target_user_nick}\n"
+                    f"🆔 ID: {target_id}"
+                )
                 try:
                     await query.edit_message_text(confirmation_text, parse_mode="Markdown")
                 except:
@@ -711,8 +798,13 @@ async def handle_admin_callback(query, context, data, user):
                 blacklist.remove(target_id_int)
                 save_json(BLACKLIST_FILE, blacklist)
                 
-                # Визуальное подтверждение с информацией о пользователе
-                confirmation_text = f"✅ *Пользователь разблокирован*{target_user_info}"
+                # Визуальное подтверждение с полной информацией о пользователе
+                confirmation_text = (
+                    f"✅ *Пользователь разблокирован*\n"
+                    f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
+                    f"👨‍💻 Ник: @{target_user_nick}\n"
+                    f"🆔 ID: {target_id}"
+                )
                 try:
                     await query.edit_message_text(confirmation_text, parse_mode="Markdown")
                 except:
@@ -756,7 +848,7 @@ async def handle_admin_callback(query, context, data, user):
             if target_id in apps:
                 # Сохраняем ID заявки для отклонения
                 context.chat_data["pending_reject_app"] = target_id
-                # Показываем шаблоны причин
+                # Показываем шаблоны причин с кнопкой отмены
                 try:
                     await query.edit_message_text(
                         "📝 *Выберите причину отклонения:*",
@@ -774,16 +866,24 @@ async def handle_admin_callback(query, context, data, user):
             return
         
         if action == "reply":
-            context.chat_data["replying_to"] = target_id
-            try:
-                await query.edit_message_text("✉️ *Введите ответ для пользователя:*", parse_mode="Markdown")
-            except:
-                # Если не удалось отредактировать сообщение (например, под фото)
-                await context.bot.send_message(
-                    user.id,
-                    "✉️ *Введите ответ для пользователя:*",
-                    parse_mode="Markdown"
-                )
+            if target_id in apps:
+                # Сохраняем ID пользователя для ответа
+                context.chat_data["replying_to"] = target_id
+                # Показываем типовые ответы с кнопкой отмены
+                try:
+                    await query.edit_message_text(
+                        "✉️ *Выберите типовой ответ или введите свой:*",
+                        parse_mode="Markdown",
+                        reply_markup=create_reply_templates_keyboard(target_id)
+                    )
+                except:
+                    # Если не удалось отредактировать сообщение (например, под фото)
+                    await context.bot.send_message(
+                        user.id,
+                        "✉️ *Выберите типовой ответ или введите свой:*",
+                        parse_mode="Markdown",
+                        reply_markup=create_reply_templates_keyboard(target_id)
+                    )
             return
         
         if action == "reject_custom":
@@ -794,6 +894,18 @@ async def handle_admin_callback(query, context, data, user):
                 await context.bot.send_message(
                     user.id,
                     "✏️ *Введите свою причину отклонения:*",
+                    parse_mode="Markdown"
+                )
+            return
+        
+        if action == "reply_custom":
+            context.chat_data["replying_to_custom"] = target_id
+            try:
+                await query.edit_message_text("✏️ *Введите свой ответ:*", parse_mode="Markdown")
+            except:
+                await context.bot.send_message(
+                    user.id,
+                    "✏️ *Введите свой ответ:*",
                     parse_mode="Markdown"
                 )
             return
@@ -866,9 +978,9 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("rejecting_app", None)
         return
     
-    # Обработка ответа пользователю
-    if "replying_to" in context.chat_data:
-        target_id = context.chat_data["replying_to"]
+    # Обработка своего ответа пользователю
+    if "replying_to_custom" in context.chat_data:
+        target_id = context.chat_data["replying_to_custom"]
         
         try:
             await context.bot.send_message(
@@ -876,11 +988,11 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"✉️ *Сообщение от администратора:*\n\n{text}",
                 parse_mode="Markdown"
             )
-            await update.message.reply_text("✅ *Ответ отправлен пользователю.*", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ *Ответ отправлен.*\n\n{text}", parse_mode="Markdown")
         except:
             await update.message.reply_text("❌ Не удалось отправить сообщение.")
         
-        context.chat_data.pop("replying_to", None)
+        context.chat_data.pop("replying_to_custom", None)
         return
 
 # ================== ЗАПУСК БОТА ==================
@@ -903,7 +1015,7 @@ def main() -> None:
     # Упрощенный обработчик для администраторских ответов
     async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
-        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to" in context.chat_data):
+        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
             await handle_admin_reply(update, context)
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
