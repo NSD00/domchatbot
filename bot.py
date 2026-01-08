@@ -8,6 +8,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import (
     Update,
@@ -153,11 +154,13 @@ def cleanup_old_apps() -> int:
 # ================== ТЕКСТОВЫЕ КОНСТАНТЫ ==================
 HELP_TEXT = (
     "❓ *Зачем нужен кадастровый номер?*\n\n"
-    "📌 *По кадастровому номеру невозможно узнать:*\n"
-    "• 🧾 ФИО, дату рождения, паспортные данные\n"
-    "• 🔒 Данные не дают доступа к собственности\n"
-    "• 👤 Их видит только администратор дома\n"
-    "• 🗑 После сверки все данные удаляются автоматически!\n\n"
+    "Кадастровый номер нужен для подтверждения\n"
+    "проживания Вас в доме.\n\n"
+    "📌 По кадастровому номеру *невозможно* узнать:\n"
+    "🧾 ФИО, дату рождения, паспортные данные\n"
+    "🔒 Данные *не дают* доступа к собственности\n"
+    "👤 Их видит *только* администратор дома\n"
+    "🗑 После сверки все данные *удаляются* автоматически!\n\n"
     "📋 *Процесс подачи заявки:*\n"
     "1. Введите номер квартиры\n"
     "2. Введите или отправьте файл с кадастровым номером\n"
@@ -952,37 +955,37 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTH CHECK ==================
-def run_simple_http_server():
-    """Запускает простой HTTP сервер для health check"""
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import socket
+# ================== ПРОСТОЙ HTTP СЕРВЕР БЕЗ ASYNCIO ==================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Обработчик HTTP запросов для health check"""
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = json.dumps({
+                "status": "healthy",
+                "bot_version": BOT_VERSION,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            self.wfile.write(response.encode())
+        else:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = json.dumps({
+                "status": "bot_running",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            self.wfile.write(response.encode())
     
-    class HealthCheckHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health':
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = json.dumps({
-                    "status": "healthy",
-                    "bot_version": BOT_VERSION,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                })
-                self.wfile.write(response.encode())
-            else:
-                self.send_response(200)
-                self.send_header('Content-type', 'application/json')
-                self.end_headers()
-                response = json.dumps({
-                    "status": "bot_running",
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                })
-                self.wfile.write(response.encode())
-        
-        def log_message(self, format, *args):
-            # Отключаем логирование HTTP запросов
-            pass
+    def log_message(self, format, *args):
+        # Отключаем логирование HTTP запросов
+        pass
+
+def run_http_server():
+    """Запускает HTTP сервер в отдельном процессе"""
+    import socket
     
     port = int(os.getenv("PORT", 10000))
     
@@ -998,8 +1001,8 @@ def run_simple_http_server():
             else:
                 raise
 
-# ================== ЗАПУСК БОТА ==================
-async def run_bot():
+# ================== ЗАПУСК ==================
+def start_bot():
     """Запускает Telegram бота"""
     if not BOT_TOKEN:
         logger.error("Токен бота не установлен!")
@@ -1007,30 +1010,42 @@ async def run_bot():
     
     ensure_dirs()
     
-    # Создаем приложение
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Создаем новое asyncio событие для этого потока
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # Регистрируем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+    async def run_bot_async():
+        """Асинхронный запуск бота"""
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Регистрируем обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+        application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+        
+        async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            user = update.effective_user
+            if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
+                await handle_admin_reply(update, context)
+        
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
+        
+        logger.info(f"Бот версии {BOT_VERSION} запускается...")
+        
+        # Запускаем бота
+        await application.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            allowed_updates=Update.ALL_TYPES
+        )
     
-    async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
-            await handle_admin_reply(update, context)
-    
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
-    
-    logger.info(f"Бот версии {BOT_VERSION} запускается...")
-    
-    # Запускаем бота
-    await application.run_polling(
-        drop_pending_updates=True,
-        close_loop=False,
-        allowed_updates=Update.ALL_TYPES
-    )
+    try:
+        loop.run_until_complete(run_bot_async())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
+    finally:
+        loop.close()
 
 def main():
     """Основная функция запуска"""
@@ -1044,20 +1059,15 @@ def main():
     if not ADMINS:
         logger.warning("Предупреждение: ADMINS не установлен, админские функции не будут доступны")
     
-    # Если есть флаг --health, запускаем только health check сервер
-    if len(sys.argv) > 1 and sys.argv[1] == '--health':
-        run_simple_http_server()
-    else:
-        # Запускаем и бота, и HTTP сервер в разных потоках
-        import threading
-        
-        # Запускаем HTTP сервер в отдельном потоке
-        http_thread = threading.Thread(target=run_simple_http_server, daemon=True)
-        http_thread.start()
-        logger.info("HTTP сервер для health check запущен в фоновом потоке")
-        
-        # Запускаем бота в основном потоке
-        asyncio.run(run_bot())
+    # Запускаем HTTP сервер в отдельном процессе (не потоке!)
+    import multiprocessing
+    
+    http_process = multiprocessing.Process(target=run_http_server, daemon=True)
+    http_process.start()
+    logger.info("HTTP сервер для health check запущен в отдельном процессе")
+    
+    # Запускаем бота в основном процессе
+    start_bot()
 
 if __name__ == "__main__":
     main()
