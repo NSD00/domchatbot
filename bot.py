@@ -8,6 +8,8 @@ from typing import Optional, Dict, Any, List
 import threading
 import asyncio
 from flask import Flask, request
+import signal
+import sys
 
 from telegram import (
     Update,
@@ -25,81 +27,6 @@ from telegram.ext import (
     filters
 )
 
-# ================== ВЕБ-СЕРВЕР ==================
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    """Простой эндпоинт для проверки работы бота"""
-    return {
-        "status": "ok",
-        "bot_version": BOT_VERSION,
-        "service": "telegram-bot",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-@app.route('/health')
-def health():
-    """Эндпоинт для health check (используется Render для проверки)"""
-    return {
-        "status": "healthy",
-        "version": BOT_VERSION,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-@app.route('/stats')
-def stats():
-    """Статистика бота"""
-    apps = load_json(APPS_FILE, {})
-    total = len(apps)
-    pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
-    approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
-    rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
-    
-    return {
-        "applications": {
-            "total": total,
-            "pending": pending,
-            "approved": approved,
-            "rejected": rejected
-        },
-        "bot": {
-            "version": BOT_VERSION,
-            "uptime": get_uptime(),
-            "admins": len(ADMINS)
-        }
-    }
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Эндпоинт для вебхуков (опционально)"""
-    # Для будущей интеграции
-    return {"status": "webhook_received"}
-
-def run_flask():
-    """Запускает Flask сервер в отдельном потоке"""
-    port = int(os.getenv("PORT", 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-
-def get_uptime() -> str:
-    """Возвращает время работы бота"""
-    if not hasattr(get_uptime, 'start_time'):
-        get_uptime.start_time = datetime.now(timezone.utc)
-    
-    uptime = datetime.now(timezone.utc) - get_uptime.start_time
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    
-    if days > 0:
-        return f"{days}d {hours}h {minutes}m"
-    elif hours > 0:
-        return f"{hours}h {minutes}m"
-    elif minutes > 0:
-        return f"{minutes}m {seconds}s"
-    else:
-        return f"{seconds}s"
-
 # ================== НАСТРОЙКИ ЛОГГИРОВАНИЯ ==================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -108,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.8"  # Увеличиваем версию
+BOT_VERSION = "1.1.8"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -135,6 +62,76 @@ REPLY_TEMPLATES = [
     "🔄 Проверяем информацию, ожидайте",
     "📞 Свяжемся с вами для уточнения деталей"
 ]
+
+# Глобальная переменная для отслеживания времени запуска
+START_TIME = datetime.now(timezone.utc)
+
+# ================== ВЕБ-СЕРВЕР ==================
+def create_flask_app():
+    """Создает и настраивает Flask приложение"""
+    flask_app = Flask(__name__)
+    
+    @flask_app.route('/')
+    def home():
+        """Простой эндпоинт для проверки работы бота"""
+        uptime = datetime.now(timezone.utc) - START_TIME
+        return {
+            "status": "ok",
+            "bot_version": BOT_VERSION,
+            "service": "telegram-bot",
+            "uptime_seconds": int(uptime.total_seconds()),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    
+    @flask_app.route('/health')
+    def health():
+        """Эндпоинт для health check (используется Render для проверки)"""
+        return {
+            "status": "healthy",
+            "version": BOT_VERSION,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }, 200
+    
+    @flask_app.route('/stats')
+    def stats():
+        """Статистика бота"""
+        apps = load_json(APPS_FILE, {})
+        total = len(apps)
+        pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
+        approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
+        rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
+        
+        uptime = datetime.now(timezone.utc) - START_TIME
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        return {
+            "applications": {
+                "total": total,
+                "pending": pending,
+                "approved": approved,
+                "rejected": rejected
+            },
+            "bot": {
+                "version": BOT_VERSION,
+                "uptime": {
+                    "days": days,
+                    "hours": hours,
+                    "minutes": minutes,
+                    "seconds": seconds
+                },
+                "admins_count": len(ADMINS),
+                "start_time": START_TIME.isoformat()
+            }
+        }
+    
+    @flask_app.route('/webhook', methods=['POST'])
+    def webhook():
+        """Эндпоинт для вебхуков (опционально)"""
+        return {"status": "webhook_received", "timestamp": datetime.now(timezone.utc).isoformat()}
+    
+    return flask_app
 
 # ================== УТИЛИТЫ ==================
 def ensure_dirs() -> None:
@@ -173,8 +170,6 @@ def is_blocked(user_id: int) -> bool:
 
 def validate_flat_number(text: str) -> bool:
     """Проверяет валидность номера квартиры"""
-    # Разрешаем: цифры, может быть буква в конце (например, "12А")
-    # Минимум 1 цифра, максимум 10 символов
     pattern = r'^\d+[a-zA-Zа-яА-Я]?$'
     return bool(re.match(pattern, text.strip())) and len(text.strip()) <= 10
 
@@ -305,7 +300,6 @@ def create_reject_templates_keyboard(pending_app_id: str) -> InlineKeyboardMarku
     """Создает клавиатуру с шаблонами причин отклонения"""
     buttons = []
     for template in REJECT_TEMPLATES:
-        # Используем безопасный формат callback_data
         callback_data = f"reject_template_{pending_app_id}_{hash(template) % 10000}"
         buttons.append([InlineKeyboardButton(template, callback_data=callback_data)])
     buttons.append([InlineKeyboardButton("✏️ Своя причина", callback_data=f"reject_custom:{pending_app_id}")])
@@ -316,7 +310,6 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
     """Создает клавиатуру с типовыми ответами"""
     buttons = []
     for template in REPLY_TEMPLATES:
-        # Используем безопасный формат callback_data
         callback_data = f"reply_template_{target_user_id}_{hash(template) % 10000}"
         buttons.append([InlineKeyboardButton(template, callback_data=callback_data)])
     buttons.append([InlineKeyboardButton("✏️ Свой ответ", callback_data=f"reply_custom:{target_user_id}")])
@@ -339,7 +332,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_old_apps()
     
     if is_admin(user.id):
-        # Для админов показываем информацию об обновлении
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Обновлено до версии: `{BOT_VERSION}`\n\n"
@@ -368,7 +360,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обработчик текстовых сообщений"""
     user = update.effective_user
     
-    # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
         return
@@ -401,7 +392,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             status_msg = f"📋 *Ваша заявка*\n\n🏠 Квартира: {app.get('flat', '—')}\n📌 Статус: {app.get('status', '—')}"
             if app.get("reject_reason"):
                 status_msg += f"\n\n*Причина отклонения:*\n{app['reject_reason']}"
-                # Добавляем кнопку для новой заявки после отклонения
                 if app.get("status") == STATUS_TEXT["rejected"]:
                     await update.message.reply_text(
                         status_msg,
@@ -458,7 +448,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if step == "flat":
-        # Проверка номера квартиры
         if not validate_flat_number(text):
             await update.message.reply_text(
                 "❌ *Неверный формат номера квартиры.*\n\n"
@@ -493,7 +482,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         context.user_data["cad"] = cadastre
         
-        # Для пользователя - обычный текст
         confirm_text = (
             f"📋 *Проверьте введенные данные:*\n\n"
             f"🏠 Квартира: {context.user_data['flat']}\n"
@@ -522,7 +510,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         for uid, app in apps.items():
             blocked = is_blocked(int(uid))
             
-            # НОВАЯ СТРУКТУРА: имя, ник, id, квартира, кадастр, статус
             app_text = (
                 f"👤 Имя: {app.get('name', '—')}\n"
                 f"👨‍💻 Ник: @{app.get('username', '—')}\n"
@@ -531,14 +518,12 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             
             if app.get("cadastre"):
-                # Для админа - inline code (две кавычки) для удобного копирования
                 app_text += f"📄 Кадастр: `{app['cadastre']}`\n\n"
             else:
                 app_text += "\n"
             
             app_text += f"📌 Статус: {app.get('status', '—')}"
             
-            # Добавляем причину отклонения, если есть
             if app.get("reject_reason") and app.get("status") == STATUS_TEXT["rejected"]:
                 app_text += f"\n\n*Причина отклонения:*\n{app['reject_reason']}"
             
@@ -601,7 +586,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """Обработчик файлов"""
     user = update.effective_user
     
-    # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
         return
@@ -620,7 +604,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     
     try:
-        # Скачиваем файл
         timestamp = int(datetime.now().timestamp())
         if file_type == "document":
             ext = pathlib.Path(file.file_name or "file").suffix or ".dat"
@@ -636,7 +619,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ Ошибка при загрузке файла.")
         return
     
-    # Сохраняем заявку
     apps = load_json(APPS_FILE, {})
     
     apps[str(user.id)] = {
@@ -651,7 +633,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     }
     
     if save_json(APPS_FILE, apps):
-        # Уведомляем администраторов - inline code для кадастра
         app_info = (
             f"🆕 *Новая заявка (файл):*\n\n"
             f"👤 Имя: {user.full_name}\n"
@@ -663,7 +644,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         for admin_id in ADMINS:
             try:
-                # Отправляем файл администратору
                 if file_type == "photo":
                     await context.bot.send_photo(
                         admin_id,
@@ -682,7 +662,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     )
             except Exception as e:
                 logger.error(f"Ошибка отправки файла админу {admin_id}: {e}")
-                # Если не удалось отправить файл, отправляем текстовое сообщение
                 try:
                     await context.bot.send_message(
                         admin_id,
@@ -719,7 +698,6 @@ async def handle_user_callback(query, context, data, user):
         }
         save_json(APPS_FILE, apps)
         
-        # Уведомляем администраторов - inline code для кадастра
         app_info = (
             f"🆕 *Новая заявка:*\n\n"
             f"👤 Имя: {u.full_name}\n"
@@ -755,14 +733,11 @@ async def handle_admin_callback(query, context, data, user):
         await query.edit_message_text("❌ У вас нет прав для этого действия.")
         return
     
-    # Проверяем формат callback_data
     if not data:
         await query.edit_message_text("❌ Неверный формат команды.")
         return
     
-    # Обработка отмены действий
     if data.startswith("cancel:"):
-        # Просто возвращаемся назад
         try:
             await query.edit_message_text("↩️ Действие отменено.")
         except:
@@ -770,20 +745,16 @@ async def handle_admin_callback(query, context, data, user):
         return
     
     if data.startswith("cancel_reply:"):
-        # Отмена ответа
         try:
             await query.edit_message_text("↩️ Ответ отменен.")
         except:
             await context.bot.send_message(user.id, "↩️ Ответ отменен.")
         return
     
-    # Обработка шаблонов причин отклонения
     if data.startswith("reject_template_"):
-        # Формат: reject_template_<app_id>_<hash>
         parts = data.split("_")
         if len(parts) >= 3:
             app_id = parts[2]
-            # Находим соответствующий шаблон
             template_text = None
             for template in REJECT_TEMPLATES:
                 if str(hash(template) % 10000) == parts[3]:
@@ -794,13 +765,10 @@ async def handle_admin_callback(query, context, data, user):
                 await process_rejection(context, app_id, template_text, query)
                 return
     
-    # Обработка типовых ответов
     if data.startswith("reply_template_"):
-        # Формат: reply_template_<user_id>_<hash>
         parts = data.split("_")
         if len(parts) >= 3:
             target_id = parts[2]
-            # Находим соответствующий шаблон
             reply_text = None
             for template in REPLY_TEMPLATES:
                 if str(hash(template) % 10000) == parts[3]:
@@ -808,7 +776,6 @@ async def handle_admin_callback(query, context, data, user):
                     break
             
             if reply_text and target_id:
-                # Отправляем ответ пользователю
                 try:
                     await context.bot.send_message(
                         int(target_id),
@@ -830,7 +797,6 @@ async def handle_admin_callback(query, context, data, user):
                         await context.bot.send_message(user.id, f"❌ Не удалось отправить сообщение: {e}")
                 return
     
-    # Обработка обычных действий с :
     if ":" in data:
         action, target_id = data.split(":", 1)
         
@@ -838,7 +804,6 @@ async def handle_admin_callback(query, context, data, user):
         blacklist = load_json(BLACKLIST_FILE, [])
         target_id_int = int(target_id)
         
-        # Получаем информацию о пользователе для уведомлений
         target_user_info = ""
         target_user_nick = ""
         if target_id in apps:
@@ -850,7 +815,6 @@ async def handle_admin_callback(query, context, data, user):
                 blacklist.append(target_id_int)
                 save_json(BLACKLIST_FILE, blacklist)
                 
-                # Визуальное подтверждение с полной информацией о пользователе
                 confirmation_text = (
                     f"⛔ *Пользователь заблокирован*\n"
                     f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
@@ -877,7 +841,6 @@ async def handle_admin_callback(query, context, data, user):
                 blacklist.remove(target_id_int)
                 save_json(BLACKLIST_FILE, blacklist)
                 
-                # Визуальное подтверждение с полной информацией о пользователе
                 confirmation_text = (
                     f"✅ *Пользователь разблокирован*\n"
                     f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
@@ -925,9 +888,7 @@ async def handle_admin_callback(query, context, data, user):
         
         if action == "reject":
             if target_id in apps:
-                # Сохраняем ID заявки для отклонения
                 context.chat_data["pending_reject_app"] = target_id
-                # Показываем шаблоны причин с кнопкой отмены
                 try:
                     await query.edit_message_text(
                         "📝 *Выберите причину отклонения:*",
@@ -935,7 +896,6 @@ async def handle_admin_callback(query, context, data, user):
                         reply_markup=create_reject_templates_keyboard(target_id)
                     )
                 except:
-                    # Если не удалось отредактировать сообщение (например, под фото)
                     await context.bot.send_message(
                         user.id,
                         "📝 *Выберите причину отклонения:*",
@@ -946,9 +906,7 @@ async def handle_admin_callback(query, context, data, user):
         
         if action == "reply":
             if target_id in apps:
-                # Сохраняем ID пользователя для ответа
                 context.chat_data["replying_to"] = target_id
-                # Показываем типовые ответы с кнопкой отмены
                 try:
                     await query.edit_message_text(
                         "✉️ *Выберите типовой ответ или введите свой:*",
@@ -956,7 +914,6 @@ async def handle_admin_callback(query, context, data, user):
                         reply_markup=create_reply_templates_keyboard(target_id)
                     )
                 except:
-                    # Если не удалось отредактировать сообщение (например, под фото)
                     await context.bot.send_message(
                         user.id,
                         "✉️ *Выберите типовой ответ или введите свой:*",
@@ -1000,7 +957,6 @@ async def process_rejection(context, app_id, reason, query=None):
         apps[app_id]["reject_reason"] = reason
         save_json(APPS_FILE, apps)
         
-        # Уведомляем пользователя с кнопкой для новой заявки
         try:
             await context.bot.send_message(
                 int(app_id),
@@ -1022,7 +978,6 @@ async def process_rejection(context, app_id, reason, query=None):
                     parse_mode="Markdown"
                 )
         
-        # Очищаем контекст
         context.chat_data.pop("pending_reject_app", None)
         return True
     return False
@@ -1035,7 +990,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     user = query.from_user
     
-    # Разделяем обработку
     if data in ["cad_ok", "cad_no"]:
         await handle_user_callback(query, context, data, user)
     else:
@@ -1049,7 +1003,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_admin(user.id):
         return
     
-    # Обработка своей причины отклонения
     if "rejecting_app" in context.chat_data:
         app_id = context.chat_data["rejecting_app"]
         await process_rejection(context, app_id, text)
@@ -1057,7 +1010,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("rejecting_app", None)
         return
     
-    # Обработка своего ответа пользователю
     if "replying_to_custom" in context.chat_data:
         target_id = context.chat_data["replying_to_custom"]
         
@@ -1074,8 +1026,15 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ЗАПУСК БОТА И ВЕБ-СЕРВЕРА ==================
-def run_bot():
+# ================== ФУНКЦИИ ДЛЯ ЗАПУСКА ==================
+def run_webserver():
+    """Запускает Flask веб-сервер"""
+    flask_app = create_flask_app()
+    port = int(os.getenv("PORT", 10000))
+    logger.info(f"Запуск веб-сервера на порту {port}")
+    flask_app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+
+async def run_bot():
     """Запускает Telegram бота"""
     if not BOT_TOKEN:
         logger.error("Токен бота не установлен!")
@@ -1083,53 +1042,63 @@ def run_bot():
     
     ensure_dirs()
     
-    # Создаем приложение с обработкой конфликтов
-    app_bot = Application.builder().token(BOT_TOKEN).build()
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CallbackQueryHandler(handle_callback))
-    app_bot.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     
-    # Упрощенный обработчик для администраторских ответов
     async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
             await handle_admin_reply(update, context)
     
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
-    
-    # Обычные текстовые сообщения (низкий приоритет)
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
     
     logger.info(f"Бот версии {BOT_VERSION} запускается...")
     
-    # Запуск с обработкой конфликтов
-    try:
-        app_bot.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            allowed_updates=Update.ALL_TYPES
-        )
-    except Exception as e:
-        logger.error(f"Ошибка запуска бота: {e}")
-        import time
-        time.sleep(5)
-        app_bot.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            allowed_updates=Update.ALL_TYPES
-        )
+    # Запускаем бота
+    await application.run_polling(
+        drop_pending_updates=True,
+        close_loop=False,
+        allowed_updates=Update.ALL_TYPES
+    )
 
-def main() -> None:
-    """Основная функция запуска приложения"""
-    # Запускаем Flask в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info(f"Flask сервер запущен на порту {os.getenv('PORT', 10000)}")
+def signal_handler(signum, frame):
+    """Обработчик сигналов для корректного завершения"""
+    logger.info(f"Получен сигнал {signum}, завершаем работу...")
+    sys.exit(0)
+
+# ================== ГЛАВНАЯ ФУНКЦИЯ ==================
+def main():
+    """Основная функция запуска"""
+    # Настраиваем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Проверяем обязательные переменные окружения
+    if not BOT_TOKEN:
+        logger.error("Ошибка: BOT_TOKEN не установлен!")
+        return
+    
+    if not ADMINS:
+        logger.warning("Предупреждение: ADMINS не установлен, админские функции не будут доступны")
+    
+    # Запускаем веб-сервер в отдельном потоке
+    webserver_thread = threading.Thread(target=run_webserver, daemon=True)
+    webserver_thread.start()
+    logger.info("Веб-сервер запущен в фоновом потоке")
     
     # Запускаем бота в основном потоке
-    run_bot()
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"Ошибка в основном цикле бота: {e}")
 
 if __name__ == "__main__":
     main()
