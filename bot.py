@@ -3,14 +3,14 @@ import json
 import logging
 import pathlib
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List
 import threading
-import asyncio
-from flask import Flask, request
+import time
 import signal
 import sys
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, List
 
+from flask import Flask
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -35,7 +35,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.8"
+BOT_VERSION = "1.1.7"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -62,76 +62,6 @@ REPLY_TEMPLATES = [
     "🔄 Проверяем информацию, ожидайте",
     "📞 Свяжемся с вами для уточнения деталей"
 ]
-
-# Глобальная переменная для отслеживания времени запуска
-START_TIME = datetime.now(timezone.utc)
-
-# ================== ВЕБ-СЕРВЕР ==================
-def create_flask_app():
-    """Создает и настраивает Flask приложение"""
-    flask_app = Flask(__name__)
-    
-    @flask_app.route('/')
-    def home():
-        """Простой эндпоинт для проверки работы бота"""
-        uptime = datetime.now(timezone.utc) - START_TIME
-        return {
-            "status": "ok",
-            "bot_version": BOT_VERSION,
-            "service": "telegram-bot",
-            "uptime_seconds": int(uptime.total_seconds()),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    
-    @flask_app.route('/health')
-    def health():
-        """Эндпоинт для health check (используется Render для проверки)"""
-        return {
-            "status": "healthy",
-            "version": BOT_VERSION,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }, 200
-    
-    @flask_app.route('/stats')
-    def stats():
-        """Статистика бота"""
-        apps = load_json(APPS_FILE, {})
-        total = len(apps)
-        pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
-        approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
-        rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
-        
-        uptime = datetime.now(timezone.utc) - START_TIME
-        days = uptime.days
-        hours, remainder = divmod(uptime.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        return {
-            "applications": {
-                "total": total,
-                "pending": pending,
-                "approved": approved,
-                "rejected": rejected
-            },
-            "bot": {
-                "version": BOT_VERSION,
-                "uptime": {
-                    "days": days,
-                    "hours": hours,
-                    "minutes": minutes,
-                    "seconds": seconds
-                },
-                "admins_count": len(ADMINS),
-                "start_time": START_TIME.isoformat()
-            }
-        }
-    
-    @flask_app.route('/webhook', methods=['POST'])
-    def webhook():
-        """Эндпоинт для вебхуков (опционально)"""
-        return {"status": "webhook_received", "timestamp": datetime.now(timezone.utc).isoformat()}
-    
-    return flask_app
 
 # ================== УТИЛИТЫ ==================
 def ensure_dirs() -> None:
@@ -324,7 +254,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.user_data.get("step"):
         context.user_data.clear()
     
-    # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
         return
@@ -339,7 +268,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"• 📋 Улучшена структура заявок\n"
             f"• ✉️ Добавлены типовые ответы\n"
             f"• ↩️ Кнопки отмены действий\n"
-            f"• 🌐 Добавлен веб-сервер\n"
             f"• 🛠 Исправлены мелкие ошибки"
         )
         
@@ -1026,53 +954,108 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ФУНКЦИИ ДЛЯ ЗАПУСКА ==================
+# ================== ВЕБ-СЕРВЕР И ЗАПУСК ==================
+def create_flask_app():
+    """Создает Flask приложение для веб-сервера"""
+    flask_app = Flask(__name__)
+    
+    @flask_app.route('/')
+    def home():
+        return {"status": "bot_running", "timestamp": datetime.now(timezone.utc).isoformat()}
+    
+    @flask_app.route('/health')
+    def health():
+        return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}, 200
+    
+    @flask_app.route('/stats')
+    def stats():
+        apps = load_json(APPS_FILE, {})
+        total = len(apps)
+        pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
+        approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
+        rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
+        
+        return {
+            "applications": {
+                "total": total,
+                "pending": pending,
+                "approved": approved,
+                "rejected": rejected
+            },
+            "bot": {
+                "version": BOT_VERSION,
+                "admins_count": len(ADMINS)
+            }
+        }
+    
+    return flask_app
+
 def run_webserver():
-    """Запускает Flask веб-сервер"""
+    """Запускает Flask веб-сервер в отдельном потоке"""
     flask_app = create_flask_app()
     port = int(os.getenv("PORT", 10000))
     logger.info(f"Запуск веб-сервера на порту {port}")
-    flask_app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    
+    # Используем production WSGI сервер
+    try:
+        from waitress import serve
+        serve(flask_app, host="0.0.0.0", port=port, threads=4)
+    except ImportError:
+        # Fallback на dev сервер
+        flask_app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 
-async def run_bot():
-    """Запускает Telegram бота"""
-    if not BOT_TOKEN:
-        logger.error("Токен бота не установлен!")
-        return
+def run_bot_in_thread():
+    """Запускает Telegram бота в отдельном потоке"""
+    import asyncio
     
-    ensure_dirs()
+    async def run_bot_async():
+        """Асинхронный запуск бота"""
+        if not BOT_TOKEN:
+            logger.error("Токен бота не установлен!")
+            return
+        
+        ensure_dirs()
+        
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CallbackQueryHandler(handle_callback))
+        application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+        
+        async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            user = update.effective_user
+            if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
+                await handle_admin_reply(update, context)
+        
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
+        
+        logger.info(f"Бот версии {BOT_VERSION} запускается...")
+        
+        await application.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            allowed_updates=Update.ALL_TYPES
+        )
     
-    # Создаем приложение
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Создаем новый event loop для этого потока
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # Регистрируем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_callback))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
-    
-    async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
-            await handle_admin_reply(update, context)
-    
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
-    
-    logger.info(f"Бот версии {BOT_VERSION} запускается...")
-    
-    # Запускаем бота
-    await application.run_polling(
-        drop_pending_updates=True,
-        close_loop=False,
-        allowed_updates=Update.ALL_TYPES
-    )
+    try:
+        loop.run_until_complete(run_bot_async())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен")
+    except Exception as e:
+        logger.error(f"Ошибка в боте: {e}")
+    finally:
+        loop.close()
 
 def signal_handler(signum, frame):
     """Обработчик сигналов для корректного завершения"""
     logger.info(f"Получен сигнал {signum}, завершаем работу...")
     sys.exit(0)
 
-# ================== ГЛАВНАЯ ФУНКЦИЯ ==================
 def main():
     """Основная функция запуска"""
     # Настраиваем обработчики сигналов
@@ -1092,13 +1075,19 @@ def main():
     webserver_thread.start()
     logger.info("Веб-сервер запущен в фоновом потоке")
     
-    # Запускаем бота в основном потоке
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
+    bot_thread.start()
+    logger.info("Бот запущен в фоновом потоке")
+    
+    # Держим основной поток активным
     try:
-        asyncio.run(run_bot())
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
+        logger.info("Остановка приложения...")
     except Exception as e:
-        logger.error(f"Ошибка в основном цикле бота: {e}")
+        logger.error(f"Ошибка в основном потоке: {e}")
 
 if __name__ == "__main__":
     main()
