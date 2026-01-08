@@ -954,7 +954,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ВЕБ-СЕРВЕР И ЗАПУСК ==================
+# ================== ВЕБ-СЕРВЕР ==================
 def create_flask_app():
     """Создает Flask приложение для веб-сервера"""
     flask_app = Flask(__name__)
@@ -967,48 +967,28 @@ def create_flask_app():
     def health():
         return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}, 200
     
-    @flask_app.route('/stats')
-    def stats():
-        apps = load_json(APPS_FILE, {})
-        total = len(apps)
-        pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
-        approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
-        rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
-        
-        return {
-            "applications": {
-                "total": total,
-                "pending": pending,
-                "approved": approved,
-                "rejected": rejected
-            },
-            "bot": {
-                "version": BOT_VERSION,
-                "admins_count": len(ADMINS)
-            }
-        }
-    
     return flask_app
 
 def run_webserver():
-    """Запускает Flask веб-сервер в отдельном потоке"""
+    """Запускает Flask веб-сервер"""
     flask_app = create_flask_app()
     port = int(os.getenv("PORT", 10000))
     logger.info(f"Запуск веб-сервера на порту {port}")
     
     # Используем production WSGI сервер
-    try:
-        from waitress import serve
-        serve(flask_app, host="0.0.0.0", port=port, threads=4)
-    except ImportError:
-        # Fallback на dev сервер
-        flask_app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+    from waitress import serve
+    serve(flask_app, host="0.0.0.0", port=port, threads=4)
 
-def run_bot_in_thread():
-    """Запускает Telegram бота в отдельном потоке"""
+# ================== ЗАПУСК БОТА ==================
+def run_bot():
+    """Запускает Telegram бота"""
     import asyncio
     
-    async def run_bot_async():
+    # Устанавливаем политику event loop для Python 3.13
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    async def main():
         """Асинхронный запуск бота"""
         if not BOT_TOKEN:
             logger.error("Токен бота не установлен!")
@@ -1016,8 +996,10 @@ def run_bot_in_thread():
         
         ensure_dirs()
         
+        # Создаем приложение
         application = Application.builder().token(BOT_TOKEN).build()
         
+        # Регистрируем обработчики
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(handle_callback))
         application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
@@ -1032,36 +1014,19 @@ def run_bot_in_thread():
         
         logger.info(f"Бот версии {BOT_VERSION} запускается...")
         
+        # Запускаем бота
         await application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
             allowed_updates=Update.ALL_TYPES
         )
     
-    # Создаем новый event loop для этого потока
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    try:
-        loop.run_until_complete(run_bot_async())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен")
-    except Exception as e:
-        logger.error(f"Ошибка в боте: {e}")
-    finally:
-        loop.close()
+    # Запускаем асинхронно
+    asyncio.run(main())
 
-def signal_handler(signum, frame):
-    """Обработчик сигналов для корректного завершения"""
-    logger.info(f"Получен сигнал {signum}, завершаем работу...")
-    sys.exit(0)
-
+# ================== ГЛАВНАЯ ФУНКЦИЯ ==================
 def main():
     """Основная функция запуска"""
-    # Настраиваем обработчики сигналов
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
     # Проверяем обязательные переменные окружения
     if not BOT_TOKEN:
         logger.error("Ошибка: BOT_TOKEN не установлен!")
@@ -1070,24 +1035,15 @@ def main():
     if not ADMINS:
         logger.warning("Предупреждение: ADMINS не установлен, админские функции не будут доступны")
     
-    # Запускаем веб-сервер в отдельном потоке
-    webserver_thread = threading.Thread(target=run_webserver, daemon=True)
-    webserver_thread.start()
-    logger.info("Веб-сервер запущен в фоновом потоке")
+    # Запускаем веб-сервер в отдельном процессе (не потоке!)
+    import multiprocessing
     
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
-    bot_thread.start()
-    logger.info("Бот запущен в фоновом потоке")
+    webserver_process = multiprocessing.Process(target=run_webserver, daemon=True)
+    webserver_process.start()
+    logger.info("Веб-сервер запущен в отдельном процессе")
     
-    # Держим основной поток активным
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Остановка приложения...")
-    except Exception as e:
-        logger.error(f"Ошибка в основном потоке: {e}")
+    # Запускаем бота в основном процессе
+    run_bot()
 
 if __name__ == "__main__":
     main()
