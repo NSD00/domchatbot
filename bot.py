@@ -4,9 +4,14 @@ import logging
 import pathlib
 import re
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
+# Импорты для HTTP сервера
+from aiohttp import web
+
+# Импорты для Telegram бота
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -32,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.8"
+BOT_VERSION = "1.1.9"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -44,6 +49,7 @@ BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 
 # Настройки
 AUTO_CLEAN_DAYS = 30
+HTTP_PORT = int(os.getenv("PORT", "8080"))
 
 # Шаблоны причин отклонения
 REJECT_TEMPLATES = [
@@ -59,6 +65,58 @@ REPLY_TEMPLATES = [
     "🔄 Проверяем информацию, ожидайте",
     "📞 Свяжемся с вами для уточнения деталей"
 ]
+
+# ================== HTTP СЕРВЕР ДЛЯ UPTIMEROBOT ==================
+async def handle_health(request):
+    """Обработчик health-check запросов для UptimeRobot"""
+    return web.Response(text="🤖 Telegram Bot is running")
+
+async def handle_stats(request):
+    """Обработчик статистики"""
+    try:
+        apps = load_json(APPS_FILE, {})
+        total = len(apps)
+        pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
+        approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
+        rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
+        
+        stats = {
+            "status": "running",
+            "version": BOT_VERSION,
+            "applications": {
+                "total": total,
+                "pending": pending,
+                "approved": approved,
+                "rejected": rejected
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        return web.json_response(stats)
+    except Exception as e:
+        logger.error(f"Error in stats endpoint: {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+async def start_http_server(port: int = 8080):
+    """Запуск HTTP сервера для health checks"""
+    app = web.Application()
+    
+    # Регистрируем маршруты
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    app.router.add_get('/ping', handle_health)
+    app.router.add_get('/status', handle_health)
+    app.router.add_get('/stats', handle_stats)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"✅ HTTP сервер запущен на порту {port}")
+    logger.info(f"📡 Доступны endpoints: /health, /ping, /stats")
+    
+    return runner
 
 # ================== УТИЛИТЫ ==================
 def ensure_dirs() -> None:
@@ -158,16 +216,17 @@ def cleanup_old_apps() -> int:
 # ================== ТЕКСТОВЫЕ КОНСТАНТЫ ==================
 HELP_TEXT = (
     "❓ *Зачем нужен кадастровый номер?*\n\n"
-    "📌 *По кадастровому номеру невозможно узнать:*\n"
-    "• 🧾 ФИО, дату рождения, паспортные данные\n"
-    "• 🔒 Данные не дают доступа к собственности\n"
-    "• 👤 Их видит только администратор дома\n"
-    "• 🗑 После сверки все данные удаляются автоматически!\n\n"
+    "Кадастровый номер нужен для подтверждения проживания Вас в доме.\n\n"
+    "📌 По кадастровому номеру *невозможно* узнать:\n"
+    "🧾 ФИО, дату рождения, паспортные данные\n"
+    "🔒 Данные *не дают* доступа к собственности\n"
+    "👤 Их видит *только* администратор дома\n"
+    "🗑 После сверки все данные *удаляются* автоматически!\n\n"
     "📋 *Процесс подачи заявки:*\n"
     "1. Введите номер квартиры\n"
     "2. Введите или отправьте файл с кадастровым номером\n"
     "3. Подтвердите данные\n"
-    "4. Ожидайте рассмотрения администратором"
+    "4. Ожидайте рассмотрения заявки администратором"
 )
 
 STATUS_TEXT = {
@@ -268,12 +327,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Для админов показываем информацию об обновлении
         update_info = (
             f"👑 *Административная панель*\n"
-            f"🔄 Обновлено до версии: `{BOT_VERSION}`\n\n"
+            f"🔄 Версия: `{BOT_VERSION}`\n"
+            f"📊 HTTP порт: `{HTTP_PORT}`\n\n"
             f"*Что нового:*\n"
-            f"• 📋 Улучшена структура заявок\n"
-            f"• ✉️ Добавлены типовые ответы\n"
-            f"• ↩️ Кнопки отмены действий\n"
-            f"• 🛠 Исправлены мелкие ошибки"
+            f"• 🌐 Добавлен HTTP сервер для мониторинга\n"
+            f"• 📈 Endpoint /stats для статистики\n"
+            f"• 🛡 Улучшена стабильность работы\n"
+            f"• 🔧 Исправлены мелкие ошибки"
         )
         
         await update.message.reply_text(
@@ -505,7 +565,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📈 Всего заявок: *{total}*\n"
             f"⏳ На рассмотрении: *{pending}*\n"
             f"✅ Одобрено: *{approved}*\n"
-            f"❌ Отклонено: *{rejected}*"
+            f"❌ Отклонено: *{rejected}*\n\n"
+            f"🌐 HTTP мониторинг: порт *{HTTP_PORT}*"
         )
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -1003,38 +1064,46 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ЗАПУСК БОТА ==================
+# ================== ЗАПУСК БОТА И HTTP СЕРВЕРА ==================
 async def main_async() -> None:
-    """Основная асинхронная функция запуска бота"""
+    """Основная асинхронная функция запуска бота и HTTP сервера"""
     if not BOT_TOKEN:
-        logger.error("Токен бота не установлен!")
+        logger.error("❌ Токен бота не установлен!")
         return
     
     ensure_dirs()
     
-    # Создаем приложение
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    logger.info(f"🤖 Запуск Telegram бота версии {BOT_VERSION}")
+    logger.info(f"🌐 HTTP порт: {HTTP_PORT}")
     
-    # Регистрируем обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
-    
-    # Упрощенный обработчик для администраторских ответов
-    async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user
-        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
-            await handle_admin_reply(update, context)
-    
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
-    
-    # Обычные текстовые сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
-    
-    logger.info(f"Бот версии {BOT_VERSION} запускается...")
-    
-    # Запуск бота
+    # Запускаем HTTP сервер для UptimeRobot
     try:
+        http_runner = await start_http_server(HTTP_PORT)
+    except Exception as e:
+        logger.error(f"❌ Ошибка запуска HTTP сервера: {e}")
+        return
+    
+    # Создаем приложение бота
+    try:
+        app = ApplicationBuilder().token(BOT_TOKEN).build()
+        
+        # Регистрируем обработчики
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(handle_callback))
+        app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
+        
+        # Упрощенный обработчик для администраторских ответов
+        async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            user = update.effective_user
+            if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
+                await handle_admin_reply(update, context)
+        
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+        
+        # Обычные текстовые сообщения
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
+        
+        # Инициализируем и запускаем бота
         await app.initialize()
         await app.start()
         
@@ -1044,29 +1113,42 @@ async def main_async() -> None:
             allowed_updates=Update.ALL_TYPES
         )
         
-        logger.info("Бот успешно запущен!")
+        logger.info("✅ Бот успешно запущен и готов к работе!")
+        logger.info("📡 Ожидание сообщений...")
+        logger.info("🔄 UptimeRobot может мониторить по адресу: /health")
         
-        # Бесконечный цикл
-        await asyncio.Event().wait()
+        # Бесконечный цикл - работаем до остановки
+        stop_event = asyncio.Event()
+        await stop_event.wait()
         
     except Exception as e:
-        logger.error(f"Критическая ошибка бота: {e}")
+        logger.error(f"❌ Критическая ошибка бота: {e}")
         raise
     finally:
-        if app:
-            try:
+        # Останавливаем HTTP сервер
+        try:
+            await http_runner.cleanup()
+            logger.info("🌐 HTTP сервер остановлен")
+        except:
+            pass
+        
+        # Останавливаем бота
+        try:
+            if 'app' in locals():
                 await app.stop()
-            except:
-                pass
+                logger.info("🤖 Бот остановлен")
+        except:
+            pass
 
 def main() -> None:
-    """Точка входа"""
+    """Точка входа в приложение"""
     try:
+        logger.info("🚀 Запуск приложения...")
         asyncio.run(main_async())
     except KeyboardInterrupt:
-        logger.info("Бот остановлен пользователем")
+        logger.info("👋 Приложение остановлено пользователем (Ctrl+C)")
     except Exception as e:
-        logger.error(f"Фатальная ошибка: {e}")
+        logger.error(f"💥 Фатальная ошибка: {e}")
 
 if __name__ == "__main__":
     main()
