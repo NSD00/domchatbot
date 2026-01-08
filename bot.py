@@ -3,12 +3,9 @@ import json
 import logging
 import pathlib
 import re
-import threading
 import asyncio
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from telegram import (
     Update,
@@ -955,54 +952,8 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
 
-# ================== ПРОСТОЙ HTTP СЕРВЕР БЕЗ ASYNCIO ==================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Обработчик HTTP запросов для health check"""
-    def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            response = json.dumps({
-                "status": "healthy",
-                "bot_version": BOT_VERSION,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            self.wfile.write(response.encode())
-        else:
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            response = json.dumps({
-                "status": "bot_running",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-            self.wfile.write(response.encode())
-    
-    def log_message(self, format, *args):
-        # Отключаем логирование HTTP запросов
-        pass
-
-def run_http_server():
-    """Запускает HTTP сервер в отдельном процессе"""
-    import socket
-    
-    port = int(os.getenv("PORT", 10000))
-    
-    # Пробуем разные порты, если основной занят
-    for p in range(port, port + 10):
-        try:
-            server = HTTPServer(('0.0.0.0', p), HealthCheckHandler)
-            logger.info(f"HTTP сервер запущен на порту {p}")
-            server.serve_forever()
-        except OSError as e:
-            if "Address already in use" in str(e):
-                continue
-            else:
-                raise
-
-# ================== ЗАПУСК ==================
-def start_bot():
+# ================== ЗАПУСК БОТА ==================
+async def main():
     """Запускает Telegram бота"""
     if not BOT_TOKEN:
         logger.error("Токен бота не установлен!")
@@ -1010,64 +961,30 @@ def start_bot():
     
     ensure_dirs()
     
-    # Создаем новое asyncio событие для этого потока
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
     
-    async def run_bot_async():
-        """Асинхронный запуск бота"""
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Регистрируем обработчики
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CallbackQueryHandler(handle_callback))
-        application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
-        
-        async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            user = update.effective_user
-            if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
-                await handle_admin_reply(update, context)
-        
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
-        
-        logger.info(f"Бот версии {BOT_VERSION} запускается...")
-        
-        # Запускаем бота
-        await application.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            allowed_updates=Update.ALL_TYPES
-        )
+    # Регистрируем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
     
-    try:
-        loop.run_until_complete(run_bot_async())
-    except KeyboardInterrupt:
-        logger.info("Бот остановлен")
-    finally:
-        loop.close()
-
-def main():
-    """Основная функция запуска"""
-    import sys
+    async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
+            await handle_admin_reply(update, context)
     
-    # Проверяем обязательные переменные окружения
-    if not BOT_TOKEN:
-        logger.error("Ошибка: BOT_TOKEN не установлен!")
-        sys.exit(1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
     
-    if not ADMINS:
-        logger.warning("Предупреждение: ADMINS не установлен, админские функции не будут доступны")
+    logger.info(f"Бот версии {BOT_VERSION} запускается...")
     
-    # Запускаем HTTP сервер в отдельном процессе (не потоке!)
-    import multiprocessing
-    
-    http_process = multiprocessing.Process(target=run_http_server, daemon=True)
-    http_process.start()
-    logger.info("HTTP сервер для health check запущен в отдельном процессе")
-    
-    # Запускаем бота в основном процессе
-    start_bot()
+    # Запускаем бота
+    await application.run_polling(
+        drop_pending_updates=True,
+        close_loop=False,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
