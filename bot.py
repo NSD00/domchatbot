@@ -1030,10 +1030,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         flat_number = context.user_data['flat']
         
         confirm_text = (
-            f"🏘️ *{COMPLEX}*\n\n"
             f"📋 *Проверьте введенные данные:*\n\n"
-            f"📍 Адрес: {house_address}\n"
-            f"🏠 Квартира: {flat_number}\n"
+            f"🏘️ *{COMPLEX}*\n"
+            f"🏠 Адрес: {house_address}, кв. {flat_number}\n"
             f"📄 Кадастр: `{cadastre}`\n\n"
             f"Всё верно?"
         )
@@ -1785,4 +1784,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
