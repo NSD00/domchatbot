@@ -4,7 +4,7 @@ import logging
 import pathlib
 import re
 import asyncio
-import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List
 
@@ -28,6 +28,7 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+import telegram.error
 
 # ================== НАСТРОЙКИ ЛОГГИРОВАНИЯ ==================
 logging.basicConfig(
@@ -37,13 +38,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.1.9"
+BOT_VERSION = "1.2.0"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
 # Пути к данным
 DATA_DIR = "data"
 FILES_DIR = os.path.join(DATA_DIR, "files")
+CONTACT_FILES_DIR = os.path.join(DATA_DIR, "contact_files")
 APPS_FILE = os.path.join(DATA_DIR, "applications.json")
 BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 
@@ -55,7 +57,8 @@ HTTP_PORT = int(os.getenv("PORT", "8080"))
 REJECT_TEMPLATES = [
     "❌ Неверный кадастровый номер",
     "❌ Нечитаемое фото/документ",
-    "❌ Несоответствие данных"
+    "❌ Несоответствие данных",
+    "⛔ Пользователь заблокирован"
 ]
 
 # Типовые ответы для администратора
@@ -121,7 +124,7 @@ async def start_http_server(port: int = 8080):
 # ================== УТИЛИТЫ ==================
 def ensure_dirs() -> None:
     """Создает необходимые директории"""
-    for directory in [DATA_DIR, FILES_DIR]:
+    for directory in [DATA_DIR, FILES_DIR, CONTACT_FILES_DIR]:
         os.makedirs(directory, exist_ok=True)
 
 def load_json(path: str, default) -> Any:
@@ -192,12 +195,22 @@ def cleanup_old_apps() -> int:
                 created = created.replace(tzinfo=timezone.utc)
             
             if now - created > timedelta(days=AUTO_CLEAN_DAYS):
+                # Удаляем файлы заявки
                 file_path = data.get("file")
                 if file_path and os.path.exists(file_path):
                     try:
                         os.remove(file_path)
                     except OSError:
                         pass
+                
+                # Удаляем контактные файлы
+                contact_files = data.get("contact_files", [])
+                for contact_file in contact_files:
+                    if os.path.exists(contact_file):
+                        try:
+                            os.remove(contact_file)
+                        except OSError:
+                            pass
                 
                 del apps[uid]
                 removed_count += 1
@@ -318,22 +331,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
+        # ❗️ ИЗМЕНЕНИЕ 1: Сообщение без ника и ID
+        await update.message.reply_text("🚫 Вы заблокированы и не можете пользоваться ботом.")
+        
+        # Автоматически закрываем все активные заявки с причиной "Пользователь заблокирован"
+        apps = load_json(APPS_FILE, {})
+        user_app = apps.get(str(user.id))
+        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
+            user_app["status"] = STATUS_TEXT["rejected"]
+            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
+            save_json(APPS_FILE, apps)
+        
         return
     
     cleanup_old_apps()
     
     if is_admin(user.id):
-        # Для админов показываем информацию об обновлении
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Версия: `{BOT_VERSION}`\n"
             f"📊 HTTP порт: `{HTTP_PORT}`\n\n"
-            f"*Что нового:*\n"
-            f"• 🌐 Добавлен HTTP сервер для мониторинга\n"
-            f"• 📈 Endpoint /stats для статистики\n"
-            f"• 🛡 Улучшена стабильность работы\n"
-            f"• 🔧 Исправлены мелкие ошибки"
+            f"*Что нового в v1.2.0:*\n"
+            f"• 🔒 Улучшена система блокировки\n"
+            f"• 📎 Прикрепление файлов к сообщениям\n"
+            f"• 📋 Кнопка 'Новая заявка' после одобрения\n"
+            f"• 🧭 Указание этапа после помощи"
         )
         
         await update.message.reply_text(
@@ -342,12 +364,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ADMIN_MENU
         )
     else:
-        await update.message.reply_text(
-            "👋 *Добро пожаловать!*\n\nВведите номер вашей квартиры:",
-            parse_mode="Markdown",
-            reply_markup=USER_MENU
-        )
-        context.user_data["step"] = "flat"
+        # Проверяем, есть ли активная заявка
+        apps = load_json(APPS_FILE, {})
+        user_app = apps.get(str(user.id))
+        
+        if user_app and user_app.get("status") == STATUS_TEXT["approved"]:
+            # ❗️ ИЗМЕНЕНИЕ 2: После одобрения показываем возможность новой заявки
+            await update.message.reply_text(
+                "✅ *Ваша предыдущая заявка была одобрена!*\n\n"
+                "Вы можете подать новую заявку:",
+                parse_mode="Markdown",
+                reply_markup=create_new_app_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                "👋 *Добро пожаловать!*\n\nВведите номер вашей квартиры:",
+                parse_mode="Markdown",
+                reply_markup=USER_MENU
+            )
+            context.user_data["step"] = "flat"
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
@@ -355,7 +390,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
+        # ❗️ ИЗМЕНЕНИЕ 1: Сообщение без ника и ID
+        await update.message.reply_text("🚫 Вы заблокированы и не можете пользоваться ботом.")
+        
+        # Автоматически закрываем все активные заявки
+        apps = load_json(APPS_FILE, {})
+        user_app = apps.get(str(user.id))
+        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
+            user_app["status"] = STATUS_TEXT["rejected"]
+            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
+            save_json(APPS_FILE, apps)
+        
         return
     
     text = update.message.text.strip()
@@ -363,6 +408,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     if any(keyword in text_lower for keyword in AUTO_HELP_KEYWORDS):
         await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+        
+        # ❗️ ИЗМЕНЕНИЕ 5: Показываем, на каком этапе пользователь
+        step = context.user_data.get("step")
+        if step == "flat":
+            await update.message.reply_text(
+                "📍 *Вы на этапе:* Ввод номера квартиры\n\n"
+                "Пожалуйста, введите номер вашей квартиры:",
+                parse_mode="Markdown"
+            )
+        elif step == "cad":
+            await update.message.reply_text(
+                "📍 *Вы на этапе:* Ввод кадастрового номера\n\n"
+                "Введите кадастровый номер или отправьте файл (фото/PDF):",
+                parse_mode="Markdown"
+            )
+        elif step == "contact":
+            await update.message.reply_text(
+                "📍 *Вы на этапе:* Написание сообщения администратору\n\n"
+                "Напишите ваше сообщение администратору (можно прикрепить файл):",
+                parse_mode="Markdown"
+            )
         return
     
     if not is_admin(user.id):
@@ -394,16 +460,50 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                         reply_markup=create_new_app_keyboard()
                     )
                     return
-            await update.message.reply_text(status_msg, parse_mode="Markdown")
+            
+            # ❗️ ИЗМЕНЕНИЕ 2: После одобрения тоже показываем кнопку новой заявки
+            if app.get("status") == STATUS_TEXT["approved"]:
+                await update.message.reply_text(
+                    status_msg + "\n\nВы можете подать новую заявку:",
+                    parse_mode="Markdown",
+                    reply_markup=create_new_app_keyboard()
+                )
+            else:
+                await update.message.reply_text(status_msg, parse_mode="Markdown")
         return
     
     if text == "📨 Написать админу":
         context.user_data["step"] = "contact"
-        await update.message.reply_text("✉️ *Напишите ваше сообщение администратору:*", parse_mode="Markdown")
+        context.user_data["contact_files"] = []  # Список для хранения файлов
+        await update.message.reply_text(
+            "✉️ *Напишите ваше сообщение администратору:*\n\n"
+            "Можно прикрепить фото или документ. Когда закончите, отправьте 'Готово'.",
+            parse_mode="Markdown"
+        )
         return
     
     if text == "❓ Помощь":
         await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+        
+        # ❗️ ИЗМЕНЕНИЕ 5: Показываем, на каком этапе пользователь
+        if step == "flat":
+            await update.message.reply_text(
+                "📍 *Вы на этапе:* Ввод номера квартиры\n\n"
+                "Пожалуйста, введите номер вашей квартиры:",
+                parse_mode="Markdown"
+            )
+        elif step == "cad":
+            await update.message.reply_text(
+                "📍 *Вы на этапе:* Ввод кадастрового номера\n\n"
+                "Введите кадастровый номер или отправьте файл (фото/PDF):",
+                parse_mode="Markdown"
+            )
+        elif step == "contact":
+            await update.message.reply_text(
+                "📍 *Вы на этапе:* Написание сообщения администратору\n\n"
+                "Напишите ваше сообщение администратору (можно прикрепить файл):",
+                parse_mode="Markdown"
+            )
         return
     
     if text == "📝 Подать новую заявку":
@@ -417,29 +517,85 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if step == "contact":
-        contact_msg = (
-            f"✉️ *Сообщение от пользователя*\n\n"
-            f"👤 Имя: {user.full_name}\n"
-            f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
-            f"🆔 ID: {user.id}\n\n"
-            f"📝 Сообщение:\n{text}"
-        )
-        
-        for admin_id in ADMINS:
-            try:
-                await context.bot.send_message(
-                    admin_id,
-                    contact_msg,
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user.id}")
-                    ]])
+        # ❗️ ИЗМЕНЕНИЕ 3: Обработка завершения сообщения админу
+        if text.lower() == "готово":
+            contact_msg = context.user_data.get("contact_text", "")
+            contact_files = context.user_data.get("contact_files", [])
+            
+            if not contact_msg and not contact_files:
+                await update.message.reply_text(
+                    "❌ Сообщение пустое. Напишите текст или прикрепите файл.",
+                    parse_mode="Markdown"
                 )
-            except Exception as e:
-                logger.error(f"Ошибка отправки сообщения админу {admin_id}: {e}")
-        
-        context.user_data.clear()
-        await update.message.reply_text("✅ *Сообщение отправлено!*", parse_mode="Markdown", reply_markup=USER_MENU)
+                return
+            
+            full_contact_msg = (
+                f"✉️ *Сообщение от пользователя*\n\n"
+                f"👤 Имя: {user.full_name}\n"
+                f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
+                f"🆔 ID: {user.id}\n\n"
+                f"📝 Сообщение:\n{contact_msg if contact_msg else '(без текста)'}"
+            )
+            
+            if contact_files:
+                full_contact_msg += f"\n\n📎 Прикреплено файлов: {len(contact_files)}"
+            
+            for admin_id in ADMINS:
+                try:
+                    # Сначала отправляем текст
+                    admin_message = await context.bot.send_message(
+                        admin_id,
+                        full_contact_msg,
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user.id}")
+                        ]])
+                    )
+                    
+                    # Затем отправляем файлы
+                    for file_path in contact_files:
+                        try:
+                            ext = pathlib.Path(file_path).suffix.lower()
+                            if ext in ['.jpg', '.jpeg', '.png', '.gif']:
+                                with open(file_path, "rb") as photo_file:
+                                    await context.bot.send_photo(
+                                        admin_id,
+                                        photo=photo_file,
+                                        caption=f"Файл от пользователя {user.full_name}",
+                                        reply_to_message_id=admin_message.message_id
+                                    )
+                            else:
+                                with open(file_path, "rb") as doc_file:
+                                    await context.bot.send_document(
+                                        admin_id,
+                                        document=doc_file,
+                                        caption=f"Файл от пользователя {user.full_name}",
+                                        reply_to_message_id=admin_message.message_id
+                                    )
+                        except Exception as e:
+                            logger.error(f"Ошибка отправки файла админу {admin_id}: {e}")
+                            
+                except Exception as e:
+                    logger.error(f"Ошибка отправки сообщения админу {admin_id}: {e}")
+            
+            # Очищаем временные файлы
+            for file_path in contact_files:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except:
+                    pass
+            
+            context.user_data.clear()
+            await update.message.reply_text("✅ *Сообщение отправлено администратору!*", 
+                                           parse_mode="Markdown", reply_markup=USER_MENU)
+        else:
+            # Сохраняем текст сообщения
+            context.user_data["contact_text"] = text
+            await update.message.reply_text(
+                "✅ Текст сохранен. Можно прикрепить файл или отправить 'Готово' для завершения.",
+                parse_mode="Markdown"
+            )
         return
     
     if step == "flat":
@@ -559,13 +715,15 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         pending = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["pending"])
         approved = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["approved"])
         rejected = sum(1 for a in apps.values() if a.get("status") == STATUS_TEXT["rejected"])
+        blocked = len(load_json(BLACKLIST_FILE, []))
         
         stats_text = (
             f"📊 *Статистика заявок*\n\n"
             f"📈 Всего заявок: *{total}*\n"
             f"⏳ На рассмотрении: *{pending}*\n"
             f"✅ Одобрено: *{approved}*\n"
-            f"❌ Отклонено: *{rejected}*\n\n"
+            f"❌ Отклонено: *{rejected}*\n"
+            f"⛔ Заблокировано пользователей: *{blocked}*\n\n"
             f"🌐 HTTP мониторинг: порт *{HTTP_PORT}*"
         )
         
@@ -591,10 +749,63 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     # Проверка блокировки для обычных пользователей
     if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text(f"🚫 Вы заблокированы.\n👨‍💻 Ник: @{user.username or '—'}\n🆔 ID: {user.id}")
+        # ❗️ ИЗМЕНЕНИЕ 1: Сообщение без ника и ID
+        await update.message.reply_text("🚫 Вы заблокированы и не можете пользоваться ботом.")
+        
+        # Автоматически закрываем все активные заявки
+        apps = load_json(APPS_FILE, {})
+        user_app = apps.get(str(user.id))
+        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
+            user_app["status"] = STATUS_TEXT["rejected"]
+            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
+            save_json(APPS_FILE, apps)
+        
         return
     
-    if context.user_data.get("step") != "cad":
+    step = context.user_data.get("step")
+    
+    # ❗️ ИЗМЕНЕНИЕ 3: Обработка файлов для сообщения админу
+    if step == "contact":
+        if update.message.document:
+            file = update.message.document
+            file_type = "document"
+        elif update.message.photo:
+            file = update.message.photo[-1]
+            file_type = "photo"
+        else:
+            return
+        
+        try:
+            # Скачиваем файл
+            timestamp = int(datetime.now().timestamp())
+            if file_type == "document":
+                ext = pathlib.Path(file.file_name or "file").suffix or ".dat"
+            else:
+                ext = ".jpg"
+            
+            safe_filename = f"contact_{user.id}_{timestamp}{ext}"
+            file_path = os.path.join(CONTACT_FILES_DIR, safe_filename)
+            
+            tg_file = await file.get_file()
+            await tg_file.download_to_drive(file_path)
+            
+            # Добавляем файл в список
+            if "contact_files" not in context.user_data:
+                context.user_data["contact_files"] = []
+            context.user_data["contact_files"].append(file_path)
+            
+            await update.message.reply_text(
+                f"✅ Файл получен. Прикреплено файлов: {len(context.user_data['contact_files'])}\n"
+                f"Можно прикрепить ещё или отправить 'Готово' для завершения.",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка загрузки контактного файла: {e}")
+            await update.message.reply_text("❌ Ошибка при загрузке файла.")
+        return
+    
+    # Обработка файлов для заявки (кадастровый номер)
+    if step != "cad":
         await update.message.reply_text("⚠️ Сначала введите номер квартиры.")
         return
     
@@ -841,11 +1052,18 @@ async def handle_admin_callback(query, context, data, user):
             if target_id_int not in blacklist:
                 blacklist.append(target_id_int)
                 if save_json(BLACKLIST_FILE, blacklist):
+                    # ❗️ ИЗМЕНЕНИЕ 1: Автоматически отклоняем активную заявку
+                    if target_id in apps and apps[target_id].get("status") == STATUS_TEXT["pending"]:
+                        apps[target_id]["status"] = STATUS_TEXT["rejected"]
+                        apps[target_id]["reject_reason"] = "⛔ Пользователь заблокирован"
+                        save_json(APPS_FILE, apps)
+                    
                     confirmation_text = (
                         f"⛔ *Пользователь заблокирован*\n"
                         f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
                         f"👨‍💻 Ник: @{target_user_nick}\n"
-                        f"🆔 ID: {target_id}"
+                        f"🆔 ID: {target_id}\n\n"
+                        f"📝 Активная заявка автоматически отклонена."
                     )
                     try:
                         await query.edit_message_text(confirmation_text, parse_mode="Markdown")
@@ -898,8 +1116,10 @@ async def handle_admin_callback(query, context, data, user):
                     try:
                         await context.bot.send_message(
                             target_id_int,
-                            "✅ *Ваша заявка одобрена!*",
-                            parse_mode="Markdown"
+                            "✅ *Ваша заявка одобрена!*\n\n"
+                            "Вы можете подать новую заявку:",
+                            parse_mode="Markdown",
+                            reply_markup=create_new_app_keyboard()
                         )
                     except Exception as e:
                         logger.error(f"Ошибка отправки уведомления пользователю {target_id}: {e}")
@@ -1103,15 +1323,35 @@ async def main_async() -> None:
         # Обычные текстовые сообщения
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
         
-        # Инициализируем и запускаем бота
+        # Инициализируем и запускаем бота с защитой от конфликтов
         await app.initialize()
         await app.start()
         
-        # Используем правильный метод запуска для python-telegram-bot 22.3.0
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
+        try:
+            # Даем время предыдущим процессам завершиться
+            await asyncio.sleep(2)
+            
+            # Запускаем polling с параметрами, снижающими конфликты
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=2.0,
+                timeout=15,
+                bootstrap_retries=3,
+                read_timeout=10
+            )
+        except telegram.error.Conflict as e:
+            logger.warning(f"⚠️ Обнаружен конфликт сессий: {e}")
+            logger.info("🔄 Пытаемся перезапустить через 5 секунд...")
+            await asyncio.sleep(5)
+            
+            await app.updater.stop()
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=3.0,
+                timeout=20
+            )
         
         logger.info("✅ Бот успешно запущен и готов к работе!")
         logger.info("📡 Ожидание сообщений...")
@@ -1121,9 +1361,14 @@ async def main_async() -> None:
         stop_event = asyncio.Event()
         await stop_event.wait()
         
+    except telegram.error.Conflict as e:
+        logger.error(f"💥 Конфликт: другой экземпляр бота уже запущен: {e}")
+        logger.info("🔄 Остановите все запущенные инстансы и перезапустите")
+        return
     except Exception as e:
         logger.error(f"❌ Критическая ошибка бота: {e}")
-        raise
+        import traceback
+        logger.error(f"Трассировка: {traceback.format_exc()}")
     finally:
         # Останавливаем HTTP сервер
         try:
@@ -1142,6 +1387,10 @@ async def main_async() -> None:
 
 def main() -> None:
     """Точка входа в приложение"""
+    # Ждем, чтобы старые процессы завершились
+    logger.info("⏳ Ожидание завершения предыдущих процессов...")
+    time.sleep(10)
+    
     try:
         logger.info("🚀 Запуск приложения...")
         asyncio.run(main_async())
@@ -1149,6 +1398,8 @@ def main() -> None:
         logger.info("👋 Приложение остановлено пользователем (Ctrl+C)")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка: {e}")
+        # Ждем перед повторной попыткой
+        time.sleep(30)
 
 if __name__ == "__main__":
     main()
