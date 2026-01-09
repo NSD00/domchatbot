@@ -234,7 +234,7 @@ def cleanup_old_apps() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                        pass
+                            pass
                 
                 del apps[uid]
                 removed_count += 1
@@ -1374,7 +1374,7 @@ async def main_async() -> None:
     except Exception as e:
         logger.error(f"❌ Критическая ошибка бота: {e}")
         import traceback
-        logger.error(f"Трассировка: {traceback.format_exc()}")
+        logger.error(f"Техническая информация: {traceback.format_exc()}")
     finally:
         # Останавливаем HTTP сервер
         try:
