@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.3.1"
+BOT_VERSION = "1.3.2"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -257,16 +257,16 @@ def create_user_menu(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
     has_active_app = user_id and str(user_id) in apps
     
     if has_active_app:
+        # Кнопка статуса на одной строке
         keyboard_buttons = [
             ["📋 Статус заявки"],
-            ["📨 Написать админу"],
-            ["❓ Помощь"]
+            ["📨 Написать админу", "❓ Помощь"]
         ]
     else:
+        # Кнопка подачи заявки на одной строке
         keyboard_buttons = [
             ["📝 Подать заявку"],
-            ["📨 Написать админу"],
-            ["❓ Помощь"]
+            ["📨 Написать админу", "❓ Помощь"]
         ]
     
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
@@ -275,8 +275,7 @@ def create_user_menu_with_new_app() -> ReplyKeyboardMarkup:
     """Создает меню с кнопкой для новой заявки"""
     keyboard_buttons = [
         ["📝 Подать новую заявку"],
-        ["📨 Написать админу"],
-        ["❓ Помощь"]
+        ["📨 Написать админу", "❓ Помощь"]
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
@@ -284,8 +283,7 @@ def create_user_menu_after_app_submission() -> ReplyKeyboardMarkup:
     """Создает меню после подачи заявки"""
     keyboard_buttons = [
         ["📋 Статус заявки"],
-        ["📨 Написать админу"],
-        ["❓ Помощь"]
+        ["📨 Написать админу", "❓ Помощь"]
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
@@ -582,10 +580,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Версия: `{BOT_VERSION}`\n"
-            f"*Что нового в v1.3.1:*\n"
-            f"• 📋 Кнопка 'Статус заявки' при активной заявке\n"
-            f"• 🔄 Автоматическое обновление меню\n"
-            f"• 🎯 Улучшенная навигация\n"
+            f"*Что нового в v1.3.2:*\n"
+            f"• 👇 Новое меню с вертикальной компоновкой\n"
+            f"• 🔔 Уведомления о блокировке/разблокировке\n"
+            f"• 🎯 Улучшенный интерфейс\n"
             f"• 🛠 Оптимизированный код"
         )
         
@@ -597,7 +595,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         await update.message.reply_text(
             "👋 *Добро пожаловать в бот для жильцов дома! ЖК Якоби-Парк*\n\n"
-            "Необходимо ввсести данные.",
+            "👇 *Выберите действие:*",
             parse_mode="Markdown",
             reply_markup=create_user_menu(user.id)
         )
@@ -1110,6 +1108,18 @@ async def handle_admin_callback(query, context, data, user):
             if target_id_int not in blacklist:
                 blacklist.append(target_id_int)
                 if save_json(BLACKLIST_FILE, blacklist):
+                    # Уведомляем пользователя о блокировке
+                    try:
+                        await context.bot.send_message(
+                            target_id_int,
+                            "🚫 *Вы заблокированы в боте.*\n\n"
+                            "Если Вы считаете, что заблокированы по ошибке, "
+                            "попросите соседа написать администратору домового чата.",
+                            parse_mode="Markdown"
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки уведомления о блокировке пользователю {target_id}: {e}")
+                    
                     # Автоматически отклоняем активную заявку
                     if target_id in apps and apps[target_id].get("status") == STATUS_TEXT["pending"]:
                         apps[target_id]["status"] = STATUS_TEXT["rejected"]
@@ -1144,6 +1154,18 @@ async def handle_admin_callback(query, context, data, user):
             if target_id_int in blacklist:
                 blacklist.remove(target_id_int)
                 if save_json(BLACKLIST_FILE, blacklist):
+                    # Уведомляем пользователя о разблокировке
+                    try:
+                        await context.bot.send_message(
+                            target_id_int,
+                            "✅ *Вы разблокированы в боте.*\n\n"
+                            "Теперь вы можете пользоваться ботом.",
+                            parse_mode="Markdown",
+                            reply_markup=create_user_menu(target_id_int)
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки уведомления о разблокировке пользователю {target_id}: {e}")
+                    
                     confirmation_text = (
                         f"✅ *Пользователь разблокирован*\n"
                         f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
