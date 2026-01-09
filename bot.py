@@ -233,17 +233,17 @@ def cleanup_old_apps() -> int:
 # ================== ТЕКСТОВЫЕ КОНСТАНТЫ ==================
 HELP_TEXT = (
     "❓ *Зачем нужен кадастровый номер?*\n\n"
-    "Кадастровый номер нужен для подтверждения проживания Вас в доме.\n\n"
+    "Кадастровый номер нужен для подтверждения проживания в доме.\n\n"
     "📌 По кадастровому номеру *невозможно* узнать:\n"
     "🧾 ФИО, дату рождения, паспортные данные\n"
     "🔒 Данные *не дают* доступа к собственности\n"
     "👤 Их видит *только* администратор домового чата\n"
     "🗑 После сверки все данные *удаляются* автоматически!\n\n"
-    "📋 *Процесс подачи заявки:*\n"
-    "1. Введите номер квартиры\n"
-    "2. Введите или отправьте файл с кадастровым номером\n"
-    "3. Подтвердите данные\n"
-    "4. Ожидайте рассмотрения заявки администратором"
+    "📋 *Кадастровый номер можно найти:*\n"
+    "1. В Выписке ЕГРН\n"
+    "2. Договорей купли-продажи\n"
+    "3. Договорей найма\n"
+    "Если сомневаетесь, можете замазать все персональные данные."
 )
 
 STATUS_TEXT = {
@@ -255,23 +255,13 @@ STATUS_TEXT = {
 AUTO_HELP_KEYWORDS = ["зачем", "почему", "кадастр", "кадастров", "помощь", "справка"]
 
 # ================== КЛАВИАТУРЫ ==================
-def create_user_menu(user_id: int = None) -> ReplyKeyboardMarkup:
-    """Создает пользовательское меню"""
-    keyboard_buttons = []
-    
-    # Проверяем, есть ли у пользователя заявка
-    if user_id:
-        apps = load_json(APPS_FILE, {})
-        user_app = apps.get(str(user_id))
-        if user_app:
-            keyboard_buttons.append(["📋 Статус заявки"])
-        else:
-            keyboard_buttons.append(["📝 Подать заявку"])
-    else:
-        keyboard_buttons.append(["📝 Подать заявку"])
-    
-    keyboard_buttons.append(["📨 Написать админу"])
-    keyboard_buttons.append(["❓ Помощь"])
+def create_user_menu() -> ReplyKeyboardMarkup:
+    """Создает пользовательское меню (кнопки всегда присутствуют)"""
+    keyboard_buttons = [
+        ["📝 Подать заявку"],
+        ["📨 Написать админу"],
+        ["❓ Помощь"]
+    ]
     
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
@@ -383,45 +373,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ADMIN_MENU
         )
     else:
-        # Создаем динамическое меню
-        user_menu = create_user_menu(user.id)
-        
-        # Проверяем, есть ли активная заявка
-        apps = load_json(APPS_FILE, {})
-        user_app = apps.get(str(user.id))
-        
-        if user_app:
-            if user_app.get("status") == STATUS_TEXT["approved"]:
-                greeting = (
-                    "👋 Добро пожаловать!\n\n"
-                    "✅ Ваша заявка на вступление *одобрена*.\n"
-                    "Вы можете подать новую заявку или написать администратору домового чата."
-                )
-            elif user_app.get("status") == STATUS_TEXT["rejected"]:
-                greeting = (
-                    "👋 Добро пожаловать!\n\n"
-                    "❌ Ваша предыдущая заявка *отклонена*.\n"
-                    "Причина: " + user_app.get("reject_reason", "не указана") + "\n\n"
-                    "Вы можете подать новую заявку или написать администратору домового чата."
-                )
-            else:
-                greeting = (
-                    "👋 Добро пожаловать!\n\n"
-                    "📋 У вас есть активная заявка.\n"
-                    "Статус: " + user_app.get("status", "неизвестно") + "\n\n"
-                    "Что хотите сделать?"
-                )
-        else:
-            greeting = (
-                "👋 *Добро пожаловать в бот для жильцов дома!*\n\n"
-                "🤖 *Что я умею:*\n"
-                "• Принять заявку на вступление в домовой чат\n"
-                "• Передать сообщение администратору домового чата\n"
-                "• Ответить на ваши вопросы\n\n"
-                "👇 Выберите действие:"
-            )
-        
-        await update.message.reply_text(greeting, parse_mode="Markdown", reply_markup=user_menu)
+        # Показываем стандартное меню (кнопки всегда одни и те же)
+        await update.message.reply_text(
+            "👋 *Добро пожаловать в бот для жильцов дома!*\n\n"
+            "Необходимо ввсести данные.",
+            parse_mode="Markdown",
+            reply_markup=create_user_menu()
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
@@ -448,6 +406,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text.strip()
     text_lower = text.lower()
     
+    # Проверка на автоматические ответы с помощью
     if any(keyword in text_lower for keyword in AUTO_HELP_KEYWORDS):
         await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
         
@@ -467,8 +426,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "📍 *Вы на этапе:* Ввод кадастрового номера\n\n"
                 "📌 *Как вводить:*\n"
                 "• Формат: XX:XX:XXXXXXX:XXX\n"
-                "• Или отправьте фото/PDF документа\n"
-                "• Кадастровый номер есть в выписке ЕГРН\n\n"
+                "• Или отправьте фото/PDF документа\n\n"
                 "Введите номер или отправьте файл:",
                 parse_mode="Markdown"
             )
@@ -476,9 +434,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text(
                 "📍 *Вы на этапе:* Написание сообщения администратору\n\n"
                 "📌 *Как отправить:*\n"
-                "• Просто напишите текст и отправьте\n"
-                "• Можете прикрепить файлы\n\n"
-                "Напишите ваше сообщение:",
+                "• Можно написать текст\n"
+                "• Можно прикрепить файлы\n"
+                "• Можно сделать всё в одном сообщении\n\n"
+                "Напишите сообщение или прикрепите файл:",
                 parse_mode="Markdown"
             )
         return
@@ -494,47 +453,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Обработка сообщений от обычных пользователей"""
     user = update.effective_user
     step = context.user_data.get("step")
-    
-    if text == "📋 Статус заявки":
-        apps = load_json(APPS_FILE, {})
-        app = apps.get(str(user.id))
-        if not app:
-            await update.message.reply_text("📭 У вас нет активных заявок.")
-        else:
-            status_msg = f"📋 *Ваша заявка*\n\n🏠 Квартира: {app.get('flat', '—')}\n📌 Статус: {app.get('status', '—')}"
-            if app.get("reject_reason"):
-                status_msg += f"\n\n*Причина отклонения:*\n{app['reject_reason']}"
-                # Добавляем кнопку для новой заявки после отклонения
-                if app.get("status") == STATUS_TEXT["rejected"]:
-                    await update.message.reply_text(
-                        status_msg,
-                        parse_mode="Markdown",
-                        reply_markup=create_new_app_keyboard()
-                    )
-                    return
-            
-            # После одобрения тоже показываем кнопку новой заявки
-            if app.get("status") == STATUS_TEXT["approved"]:
-                await update.message.reply_text(
-                    status_msg + "\n\nВы можете подать новую заявку:",
-                    parse_mode="Markdown",
-                    reply_markup=create_new_app_keyboard()
-                )
-            else:
-                await update.message.reply_text(status_msg, parse_mode="Markdown")
-        return
-    
-    if text == "📨 Написать админу":
-        context.user_data["step"] = "contact"
-        context.user_data["contact_data"] = {"text": "", "files": []}
-        
-        await update.message.reply_text(
-            "✉️ *Напишите ваше сообщение администратору домового чата:*\n\n"
-            "Просто напишите текст и отправьте.\n"
-            "Можете прикрепить фото или документ.",
-            parse_mode="Markdown"
-        )
-        return
     
     if text == "❓ Помощь":
         await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
@@ -554,8 +472,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "📍 *Вы на этапе:* Ввод кадастрового номера\n\n"
                 "📌 *Как вводить:*\n"
                 "• Формат: XX:XX:XXXXXXX:XXX\n"
-                "• Или отправьте фото/PDF документа\n"
-                "• Кадастровый номер есть в выписке ЕГРН\n\n"
+                "• Или отправьте фото/PDF документа\n\n"
                 "Введите номер или отправьте файл:",
                 parse_mode="Markdown"
             )
@@ -563,14 +480,29 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text(
                 "📍 *Вы на этапе:* Написание сообщения администратору\n\n"
                 "📌 *Как отправить:*\n"
-                "• Просто напишите текст и отправьте\n"
-                "• Можете прикрепить файлы\n\n"
-                "Напишите ваше сообщение:",
+                "• Можно написать текст\n"
+                "• Можно прикрепить файлы\n"
+                "• Можно сделать всё в одном сообщении\n\n"
+                "Напишите сообщение или прикрепите файл:",
                 parse_mode="Markdown"
             )
         return
     
-    if text == "📝 Подать заявку" or text == "📝 Подать заявку на вступление":
+    if text == "📨 Написать админу":
+        context.user_data["step"] = "contact"
+        context.user_data["contact_data"] = {"text": "", "files": []}
+        
+        await update.message.reply_text(
+            "✉️ *Напишите ваше сообщение администратору:*\n\n"
+            "• Можно написать текст\n"
+            "• Можно прикрепить файлы (фото/документы)\n"
+            "• Можно сделать всё в одном сообщении\n\n"
+            "Напишите сообщение или прикрепите файл:",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if text == "📝 Подать заявку" or text == "📝 Подать новую заявку":
         context.user_data.clear()
         await update.message.reply_text(
             "📝 *Подача заявки на вступление*\n\n"
@@ -584,7 +516,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Сохраняем текст сообщения
         context.user_data["contact_data"]["text"] = text
         
-        # Сразу отправляем сообщение
+        # Отправляем сообщение администратору
         await send_contact_message(update, context, user)
         return
     
@@ -718,13 +650,13 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(
             "✅ Сообщение отправлено администратору домового чата!",
             parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
+            reply_markup=create_user_menu()
         )
     else:
         await update.message.reply_text(
             "❌ Не удалось отправить сообщение. Попробуйте позже.",
             parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
+            reply_markup=create_user_menu()
         )
 
 async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
@@ -802,8 +734,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"⏳ На рассмотрении: *{pending}*\n"
             f"✅ Одобрено: *{approved}*\n"
             f"❌ Отклонено: *{rejected}*\n"
-            f"⛔ Заблокировано пользователей: *{blocked}*\n\n"
-            f"🌐 HTTP мониторинг: порт *{HTTP_PORT}*"
+            f"⛔ Заблокировано: *{blocked}*\n\n"
         )
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -871,20 +802,30 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             tg_file = await file.get_file()
             await tg_file.download_to_drive(file_path)
             
-            # Добавляем файл в список
+            # Инициализируем contact_data если его нет
             if "contact_data" not in context.user_data:
                 context.user_data["contact_data"] = {"text": "", "files": []}
             
+            # Добавляем файл в список
             context.user_data["contact_data"]["files"].append(file_path)
             
-            # Если текст уже есть, отправляем сразу
+            # Проверяем, есть ли текст в сообщении
+            text = update.message.caption or ""
+            if text:
+                context.user_data["contact_data"]["text"] = text
+            
+            # Если уже есть текст (или был в caption), отправляем сразу
             if context.user_data["contact_data"]["text"]:
                 await send_contact_message(update, context, user)
             else:
-                await update.message.reply_text(
-                    "✅ Файл получен. Теперь напишите текст сообщения:",
-                    parse_mode="Markdown"
-                )
+                # Если текст был в caption, он уже добавлен и сообщение отправлено
+                # Если текста нет, просим его ввести
+                if not update.message.caption:
+                    await update.message.reply_text(
+                        "✅ Файл получен. Теперь напишите текст сообщения:",
+                        parse_mode="Markdown"
+                    )
+                
         except Exception as e:
             logger.error(f"Ошибка загрузки контактного файла: {e}")
             await update.message.reply_text("❌ Ошибка при загрузке файла.")
@@ -985,7 +926,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(
             "✅ *Файл получен! Заявка отправлена на рассмотрение.*",
             parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
+            reply_markup=create_user_menu()
         )
     else:
         await update.message.reply_text("❌ Ошибка при сохранении заявки.")
@@ -1104,7 +1045,7 @@ async def handle_admin_callback(query, context, data, user):
                     try:
                         await context.bot.send_message(
                             int(target_id),
-                            f"✉️ *Сообщение от администратора домового чата:*\n\n{reply_text}",
+                            f"✉️ *Сообщение от администратора:*\n\n{reply_text}",
                             parse_mode="Markdown"
                         )
                         try:
@@ -1206,10 +1147,8 @@ async def handle_admin_callback(query, context, data, user):
                     try:
                         await context.bot.send_message(
                             target_id_int,
-                            "✅ *Ваша заявка одобрена!*\n\n"
-                            "Вы можете подать новую заявку:",
-                            parse_mode="Markdown",
-                            reply_markup=create_new_app_keyboard()
+                            "✅ *Ваша заявка одобрена!*",
+                            parse_mode="Markdown"
                         )
                     except Exception as e:
                         logger.error(f"Ошибка отправки уведомления пользователю {target_id}: {e}")
@@ -1297,14 +1236,12 @@ async def process_rejection(context, app_id, reason, query=None):
         apps[app_id]["reject_reason"] = reason
         
         if save_json(APPS_FILE, apps):
-            # Уведомляем пользователя с кнопкой для новой заявки
+            # Уведомляем пользователя (БЕЗ фразы о новой заявке)
             try:
                 await context.bot.send_message(
                     int(app_id),
-                    f"❌ *Ваша заявка отклонена.*\n\n*Причина:* {reason}\n\n"
-                    f"Вы можете подать новую заявку:",
-                    parse_mode="Markdown",
-                    reply_markup=create_new_app_keyboard()
+                    f"❌ *Ваша заявка отклонена.*\n\n*Причина:* {reason}",
+                    parse_mode="Markdown"
                 )
             except Exception as e:
                 logger.error(f"Ошибка отправки уведомления об отклонении пользователю {app_id}: {e}")
@@ -1364,7 +1301,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             await context.bot.send_message(
                 int(target_id),
-                f"✉️ *Сообщение от администратора домового чата:*\n\n{text}",
+                f"✉️ *Сообщение от администратора:*\n\n{text}",
                 parse_mode="Markdown"
             )
             await update.message.reply_text(f"✅ *Ответ отправлен.*\n\n{text}", parse_mode="Markdown")
