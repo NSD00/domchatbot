@@ -259,7 +259,7 @@ def cleanup_old_apps() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                        pass
+                            pass
                 
                 del apps[uid]
                 removed_count += 1
@@ -1735,3 +1735,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
