@@ -37,9 +37,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.3.2"
+BOT_VERSION = "1.3.4"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
+
+# ПРОСТОЙ СЛОВАРЬ ДОМОВ
+HOUSES = {}
+
+# Автоматически загружаем дома из переменных
+# Формат: HOUSE1=ул. Якоби, д. 15, CHAT1=https://t.me/...
+i = 1
+while True:
+    house_address = os.getenv(f"HOUSE{i}")
+    chat_link = os.getenv(f"CHAT{i}")
+    
+    if not house_address:  # Если нет адреса - останавливаемся
+        break
+    
+    HOUSES[f"house{i}"] = {
+        "id": f"house{i}",
+        "address": house_address,
+        "chat_link": chat_link or ""  # CHAT может быть пустым
+    }
+    
+    i += 1
+
+# Если дома не настроены - сообщение
+if not HOUSES:
+    logger.warning("⚠️ Дома не настроены в переменных окружения!")
 
 # Пути к данным
 DATA_DIR = "data"
@@ -549,6 +574,81 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
             except:
                 pass
 
+# ================== НОВАЯ ФУНКЦИЯ ДЛЯ ОТПРАВКИ ССЫЛКИ ==================
+async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
+    """Отправляет ссылку на чат выбранного дома"""
+    try:
+        house_id = user_data.get("house_id")
+        if not house_id or house_id not in HOUSES:
+            await context.bot.send_message(
+                user_id,
+                "✅ *Заявка одобрена!*\n\n"
+                "⚠️ Ошибка. Администратор свяжется с вами.",
+                parse_mode="Markdown"
+            )
+            return False
+        
+        house = HOUSES[house_id]
+        
+        if not house.get("chat_link"):
+            await context.bot.send_message(
+                user_id,
+                f"✅ *Заявка одобрена!*\n\n"
+                f"📍 {house['address']}\n\n"
+                "⚠️ Ссылка не настроена. Админ свяжется.",
+                parse_mode="Markdown"
+            )
+            return False
+        
+        # ПРОСТОЕ СООБЩЕНИЕ
+        flat_info = user_data.get("flat", "")
+        if flat_info:
+            flat_info = f"🏠 Квартира: {flat_info}\n"
+        
+        message = (
+            f"✅ *Заявка одобрена!*\n\n"
+            f"📍 {house['address']}\n"
+            f"{flat_info}\n"
+            f"🔗 *Ссылка на чат дома:*\n"
+            f"{house['chat_link']}\n\n"
+            f"1. Нажмите на ссылку\n"
+            f"2. Нажмите 'ВСТУПИТЬ'\n"
+            f"3. Ждите одобрения админа\n\n"
+            f"⚠️ Не передавайте ссылку"
+        )
+        
+        await context.bot.send_message(
+            user_id,
+            message,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+        
+        # Простое уведомление админа
+        flat_display = user_data.get('flat', '—')
+        if flat_display != '—':
+            flat_display = f"кв. {flat_display}"
+        
+        for admin_id in ADMINS:
+            try:
+                await context.bot.send_message(
+                    admin_id,
+                    f"📨 Отправлена ссылка\n"
+                    f"📍 {house['address']}\n"
+                    f"👤 {user_data.get('name', '—')}\n"
+                    f"🏠 {flat_display}\n"
+                    f"🆔 {user_id}",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка отправки: {e}")
+        return False
+
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик команды /start"""
@@ -581,11 +681,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Версия: `{BOT_VERSION}`\n"
-            f"*Что нового в v1.3.2:*\n"
-            f"• 👇 Новое меню с вертикальной компоновкой\n"
-            f"• 🔔 Уведомления о блокировке/разблокировке\n"
-            f"• 🎯 Улучшенный интерфейс\n"
-            f"• 🛠 Оптимизированный код"
+            f"🏘️ Домов настроено: {len(HOUSES)}"
         )
         
         await update.message.reply_text(
@@ -595,7 +691,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     else:
         await update.message.reply_text(
-            "👋 *Добро пожаловать в бот для жильцов дома! ЖК Якоби-Парк*\n\n"
+            "👋 *Добро пожаловать в бот для жильцов дома!*\n\n"
             "👇 *Выберите действие:*",
             parse_mode="Markdown",
             reply_markup=create_user_menu(user.id)
@@ -697,12 +793,64 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if text == "📝 Подать заявку" or text == "📝 Подать новую заявку":
         context.user_data.clear()
+        
+        if not HOUSES:
+            await update.message.reply_text(
+                "⚠️ *Система временно недоступна.*\n"
+                "Обратитесь к администратору.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Если только один дом - пропускаем выбор
+        if len(HOUSES) == 1:
+            house_id = list(HOUSES.keys())[0]
+            context.user_data["house_id"] = house_id
+            context.user_data["step"] = "flat"
+            
+            house = HOUSES[house_id]
+            await update.message.reply_text(
+                f"📍 {house['address']}\n\n"
+                f"Введите номер вашей квартиры:",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Если несколько домов
+        houses_text = "📍 *Выберите ваш адрес:*\n\n"
+        
+        for idx, (house_id, house) in enumerate(HOUSES.items(), 1):
+            houses_text += f"{idx}. {house['address']}\n"
+        
+        houses_text += f"\nНапишите номер (1-{len(HOUSES)}):"
+        
         await update.message.reply_text(
-            "📝 *Подача заявки на вступление*\n\n"
-            "Введите номер вашей квартиры:",
+            houses_text,
             parse_mode="Markdown"
         )
-        context.user_data["step"] = "flat"
+        context.user_data["step"] = "select_house"
+        return
+    
+    if step == "select_house":
+        try:
+            choice = int(text)
+            if 1 <= choice <= len(HOUSES):
+                house_id = list(HOUSES.keys())[choice-1]
+                context.user_data["house_id"] = house_id
+                context.user_data["step"] = "flat"
+                
+                house = HOUSES[house_id]
+                await update.message.reply_text(
+                    f"✅ {house['address']}\n\n"
+                    f"Введите номер квартиры:",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Введите число от 1 до {len(HOUSES)}"
+                )
+        except ValueError:
+            await update.message.reply_text("❌ Введите цифру")
         return
     
     if step == "contact":
@@ -793,11 +941,17 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         for uid, app in apps.items():
             blocked = is_blocked(int(uid))
             
+            # Получаем информацию о доме если есть
+            house_info = ""
+            house_id = app.get("house_id")
+            if house_id and house_id in HOUSES:
+                house_info = f"\n📍 {HOUSES[house_id]['address']}"
+            
             app_text = (
                 f"👤 Имя: {app.get('name', '—')}\n"
                 f"👨‍💻 Ник: @{app.get('username', '—')}\n"
                 f"🆔 ID: {uid}\n"
-                f"🏠 Квартира: {app.get('flat', '—')}\n"
+                f"🏠 Квартира: {app.get('flat', '—')}{house_info}\n"
             )
             
             if app.get("cadastre"):
@@ -853,7 +1007,8 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"⏳ На рассмотрении: *{pending}*\n"
             f"✅ Одобрено: *{approved}*\n"
             f"❌ Отклонено: *{rejected}*\n"
-            f"⛔ Заблокировано: *{blocked}*\n\n"
+            f"⛔ Заблокировано: *{blocked}*\n"
+            f"🏘️ Домов настроено: *{len(HOUSES)}*"
         )
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -990,6 +1145,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "user_id": user.id,
         "name": user.full_name,
         "username": user.username,
+        "house_id": context.user_data.get("house_id", ""),  # ← ДОБАВЛЯЕМ house_id
         "flat": context.user_data.get("flat", ""),
         "cadastre": context.user_data.get("cad", ""),
         "file": file_path,
@@ -1022,6 +1178,7 @@ async def handle_user_callback(query, context, data, user):
             "user_id": user.id,
             "name": user.full_name,
             "username": user.username,
+            "house_id": context.user_data["house_id"],  # ← ДОБАВЛЯЕМ house_id
             "flat": context.user_data["flat"],
             "cadastre": context.user_data["cad"],
             "status": STATUS_TEXT["pending"],
@@ -1239,27 +1396,28 @@ async def handle_admin_callback(query, context, data, user):
         if action == "approve":
             if target_id in apps:
                 apps[target_id]["status"] = STATUS_TEXT["approved"]
+                
                 if save_json(APPS_FILE, apps):
-                    try:
-                        await context.bot.send_message(
-                            target_id_int,
-                            "✅ *Ваша заявка одобрена!*",
-                            parse_mode="Markdown",
-                            reply_markup=create_user_menu_with_new_app()
-                        )
-                    except Exception as e:
-                        logger.error(f"Ошибка отправки уведомления пользователю {target_id}: {e}")
+                    # Отправляем ссылку на чат выбранного дома
+                    success = await send_simple_invite(
+                        context, 
+                        target_id_int,
+                        apps[target_id]
+                    )
                     
-                    try:
-                        await query.edit_message_text("✅ *Заявка одобрена.*", parse_mode="Markdown")
-                    except:
-                        await context.bot.send_message(
-                            user.id,
-                            "✅ *Заявка одобрена.*",
+                    # Простое подтверждение админу
+                    if success:
+                        await query.edit_message_text(
+                            f"✅ Заявка одобрена. Ссылка отправлена.",
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        await query.edit_message_text(
+                            f"✅ Заявка одобрена, но ошибка отправки ссылки.",
                             parse_mode="Markdown"
                         )
                 else:
-                    await query.edit_message_text("❌ Ошибка при сохранении заявки.")
+                    await query.edit_message_text("❌ Ошибка сохранения заявки.")
             return
         
         if action == "reject":
@@ -1383,6 +1541,7 @@ async def main_async() -> None:
     ensure_dirs()
     
     logger.info(f"🤖 Запуск Telegram бота версии {BOT_VERSION}")
+    logger.info(f"🏘️ Домов настроено: {len(HOUSES)}")
     logger.info(f"🌐 HTTP порт: {HTTP_PORT}")
     
     # Запускаем HTTP сервер для UptimeRobot
