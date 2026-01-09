@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.3.0"
+BOT_VERSION = "1.3.1"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -275,6 +275,15 @@ def create_user_menu_with_new_app() -> ReplyKeyboardMarkup:
     """Создает меню с кнопкой для новой заявки"""
     keyboard_buttons = [
         ["📝 Подать новую заявку"],
+        ["📨 Написать админу"],
+        ["❓ Помощь"]
+    ]
+    return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
+
+def create_user_menu_after_app_submission() -> ReplyKeyboardMarkup:
+    """Создает меню после подачи заявки"""
+    keyboard_buttons = [
+        ["📋 Статус заявки"],
         ["📨 Написать админу"],
         ["❓ Помощь"]
     ]
@@ -573,7 +582,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Версия: `{BOT_VERSION}`\n"
-            f"*Что нового в v1.3.0:*\n"
+            f"*Что нового в v1.3.1:*\n"
             f"• 📋 Кнопка 'Статус заявки' при активной заявке\n"
             f"• 🔄 Автоматическое обновление меню\n"
             f"• 🎯 Улучшенная навигация\n"
@@ -952,10 +961,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         context.user_data.clear()
         await update.message.reply_text(
-            "✅ *Файл получен! Заявка отправлена на рассмотрение.*\n\n"
-            "Теперь в меню появилась кнопка '📋 Статус заявки' для отслеживания.",
+            "✅ *Файл получен! Заявка отправлена на рассмотрение.*",
             parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
+            reply_markup=create_user_menu_after_app_submission()
         )
     else:
         await update.message.reply_text("❌ Ошибка при сохранении заявки.")
@@ -984,9 +992,14 @@ async def handle_user_callback(query, context, data, user):
             
             context.user_data.clear()
             await query.edit_message_text(
-                "✅ *Заявка отправлена на рассмотрение!*\n\n"
-                "Теперь в меню появилась кнопка '📋 Статус заявки' для отслеживания.",
+                "✅ *Заявка отправлена на рассмотрение!*",
                 parse_mode="Markdown"
+            )
+            # Отправляем меню с кнопкой статуса
+            await context.bot.send_message(
+                user.id,
+                "Теперь вы можете отслеживать статус заявки:",
+                reply_markup=create_user_menu_after_app_submission()
             )
         else:
             await query.edit_message_text("❌ Ошибка при сохранении заявки.")
