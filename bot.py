@@ -259,7 +259,7 @@ def cleanup_old_apps() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass
+                        pass
                 
                 del apps[uid]
                 removed_count += 1
@@ -651,7 +651,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
 
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start"""
+    """Обработчик команды /start с поддержкой deep linking"""
     user = update.effective_user
     
     if not context.user_data.get("step"):
@@ -677,6 +677,53 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     cleanup_old_apps()
     
+    # ============ DEEP LINKING: Обработка ?start=house1 ============
+    # Получаем параметры из ссылки (например: https://t.me/ваш_бот?start=house1)
+    args = context.args
+    
+    # Флаг: выбрал ли пользователь дом из ссылки
+    house_selected_from_link = False
+    
+    if args and len(args) > 0:
+        house_param = args[0]  # Будет "house1", "house2" и т.д.
+        
+        # Проверяем, существует ли такой дом
+        if house_param in HOUSES:
+            # ДА! Пользователь пришел по специальной ссылке
+            context.user_data["house_id"] = house_param
+            house_selected_from_link = True
+            
+            if is_admin(user.id):
+                # Админ даже со специальной ссылки видит админ-панель
+                update_info = (
+                    f"👑 *Административная панель*\n"
+                    f"🔄 Версия: `{BOT_VERSION}`\n"
+                    f"🏘️ Домов настроено: {len(HOUSES)}"
+                )
+                
+                await update.message.reply_text(
+                    update_info,
+                    parse_mode="Markdown",
+                    reply_markup=ADMIN_MENU
+                )
+            else:
+                # Обычный пользователь - сразу переходим к вводу квартиры
+                house = HOUSES[house_param]
+                context.user_data["step"] = "flat"
+                
+                await update.message.reply_text(
+                    f"📍 {house['address']}\n\n"
+                    f"Введите номер вашей квартиры:",
+                    parse_mode="Markdown",
+                    reply_markup=ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
+                )
+            
+            # Выходим из функции - дом уже выбран
+            return
+        # Если house_param не найден в HOUSES - продолжаем как обычно
+    # ============ КОНЕЦ DEEP LINKING ============
+    
+    # СТАНДАРТНОЕ ПРИВЕТСТВИЕ (если нет параметра или дом не найден)
     if is_admin(user.id):
         update_info = (
             f"👑 *Административная панель*\n"
@@ -690,12 +737,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ADMIN_MENU
         )
     else:
-        await update.message.reply_text(
-            "👋 *Добро пожаловать в бот для жильцов дома!*\n\n"
-            "👇 *Выберите действие:*",
-            parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
-        )
+        # Если несколько домов И пользователь без специальной ссылки
+        if len(HOUSES) > 1:
+            welcome_text = (
+                "👋 *Добро пожаловать!*\n\n"
+                "ℹ️ *Как подать заявку:*\n"
+                "1. Используйте QR-код в вашем подъезде\n"
+                "2. Или выберите ваш дом:\n\n"
+            )
+            
+            for idx, (house_id, house) in enumerate(HOUSES.items(), 1):
+                welcome_text += f"{idx}. {house['address']}\n"
+            
+            welcome_text += f"\nНапишите номер дома (1-{len(HOUSES)}):"
+            
+            await update.message.reply_text(
+                welcome_text,
+                parse_mode="Markdown"
+            )
+            context.user_data["step"] = "select_house"
+        else:
+            # Если только один дом - сразу к вводу квартиры
+            house_id = list(HOUSES.keys())[0]
+            context.user_data["house_id"] = house_id
+            context.user_data["step"] = "flat"
+            
+            house = HOUSES[house_id]
+            await update.message.reply_text(
+                f"📍 {house['address']}\n\n"
+                f"Введите номер вашей квартиры:",
+                parse_mode="Markdown"
+            )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
@@ -816,7 +888,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        # Если несколько домов
+        # Если несколько домов - показываем список для выбора
         houses_text = "📍 *Выберите ваш адрес:*\n\n"
         
         for idx, (house_id, house) in enumerate(HOUSES.items(), 1):
@@ -832,6 +904,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if step == "select_house":
+        # Обработка выбора дома через номер
         try:
             choice = int(text)
             if 1 <= choice <= len(HOUSES):
@@ -1145,7 +1218,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "user_id": user.id,
         "name": user.full_name,
         "username": user.username,
-        "house_id": context.user_data.get("house_id", ""),  # ← ДОБАВЛЯЕМ house_id
+        "house_id": context.user_data.get("house_id", ""),  # ← Сохраняем house_id
         "flat": context.user_data.get("flat", ""),
         "cadastre": context.user_data.get("cad", ""),
         "file": file_path,
@@ -1178,7 +1251,7 @@ async def handle_user_callback(query, context, data, user):
             "user_id": user.id,
             "name": user.full_name,
             "username": user.username,
-            "house_id": context.user_data["house_id"],  # ← ДОБАВЛЯЕМ house_id
+            "house_id": context.user_data["house_id"],  # ← Сохраняем house_id
             "flat": context.user_data["flat"],
             "cadastre": context.user_data["cad"],
             "status": STATUS_TEXT["pending"],
