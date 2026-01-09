@@ -41,6 +41,9 @@ BOT_VERSION = "1.3.4"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
+# НАЗВАНИЕ ЖК
+COMPLEX = os.getenv("COMPLEX", "Жилой комплекс")
+
 # ПРОСТОЙ СЛОВАРЬ ДОМОВ
 HOUSES = {}
 
@@ -524,12 +527,30 @@ async def process_rejection(context, app_id, reason, query=None) -> bool:
 async def notify_admins_about_new_app(context, user_id: int, user_name: str, username: str, 
                                      flat: str, cadastre: str, file_path: Optional[str] = None) -> None:
     """Уведомляет администраторов о новой заявке"""
+    
+    # ПОЛУЧАЕМ ПОЛНЫЙ АДРЕС
+    house_id = None
+    house_address = "—"
+    
+    # Ищем house_id в контексте пользователя или в заявках
+    apps = load_json(APPS_FILE, {})
+    user_app = apps.get(str(user_id))
+    if user_app and "house_id" in user_app:
+        house_id = user_app["house_id"]
+    elif "house_id" in context.user_data:
+        house_id = context.user_data["house_id"]
+    
+    if house_id and house_id in HOUSES:
+        house_address = HOUSES[house_id]["address"]
+    
     app_info = (
+        f"🏘️ *{COMPLEX}*\n\n"
         f"🆕 *Новая заявка:*\n\n"
+        f"📍 Адрес: {house_address}\n"
+        f"🏠 Квартира: {flat}\n\n"
         f"👤 Имя: {user_name}\n"
         f"👨‍💻 Ник: @{username if username else '—'}\n"
         f"🆔 ID: {user_id}\n"
-        f"🏠 Квартира: {flat}\n"
         f"📄 Кадастр: `{cadastre}`"
     )
     
@@ -594,6 +615,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
             await context.bot.send_message(
                 user_id,
                 f"✅ *Заявка одобрена!*\n\n"
+                f"🏘️ *{COMPLEX}*\n"
                 f"📍 {house['address']}\n\n"
                 "⚠️ Ссылка не настроена. Админ свяжется.",
                 parse_mode="Markdown"
@@ -607,6 +629,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         
         message = (
             f"✅ *Заявка одобрена!*\n\n"
+            f"🏘️ *{COMPLEX}*\n"
             f"📍 {house['address']}\n"
             f"{flat_info}\n"
             f"🔗 *Ссылка на чат дома:*\n"
@@ -634,6 +657,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
                 await context.bot.send_message(
                     admin_id,
                     f"📨 Отправлена ссылка\n"
+                    f"🏘️ {COMPLEX}\n"
                     f"📍 {house['address']}\n"
                     f"👤 {user_data.get('name', '—')}\n"
                     f"🏠 {flat_display}\n"
@@ -711,7 +735,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 house = HOUSES[house_param]
                 context.user_data["step"] = "flat"
                 
+                # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК В ПРИВЕТСТВИИ
                 await update.message.reply_text(
+                    f"🏘️ *{COMPLEX}*\n"
                     f"📍 {house['address']}\n\n"
                     f"Введите номер вашей квартиры:",
                     parse_mode="Markdown",
@@ -740,6 +766,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Если несколько домов И пользователь без специальной ссылки
         if len(HOUSES) > 1:
             welcome_text = (
+                f"🏘️ *{COMPLEX}*\n\n"
                 "👋 *Добро пожаловать!*\n\n"
                 "ℹ️ *Как подать заявку:*\n"
                 "1. Используйте QR-код в вашем подъезде\n"
@@ -763,7 +790,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
+            # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК В ПРИВЕТСТВИИ
             await update.message.reply_text(
+                f"🏘️ *{COMPLEX}*\n"
                 f"📍 {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
                 parse_mode="Markdown"
@@ -882,6 +911,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             house = HOUSES[house_id]
             await update.message.reply_text(
+                f"🏘️ *{COMPLEX}*\n"
                 f"📍 {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
                 parse_mode="Markdown"
@@ -889,7 +919,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
         
         # Если несколько домов - показываем список для выбора
-        houses_text = "📍 *Выберите ваш адрес:*\n\n"
+        houses_text = f"🏘️ *{COMPLEX}*\n\n📍 *Выберите ваш адрес:*\n\n"
         
         for idx, (house_id, house) in enumerate(HOUSES.items(), 1):
             houses_text += f"{idx}. {house['address']}\n"
@@ -965,7 +995,15 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         context.user_data["flat"] = text.strip()
         context.user_data["step"] = "cad"
+        
+        # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК ПРИ ЗАПРОСЕ КАДАСТРА
+        house_id = context.user_data.get("house_id")
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else ""
+        
         await update.message.reply_text(
+            f"🏘️ *{COMPLEX}*\n"
+            f"📍 {house_address}\n"
+            f"🏠 Квартира: {text.strip()}\n\n"
             "📄 Введите кадастровый номер или отправьте файл (фото/PDF):",
             parse_mode="Markdown"
         )
@@ -986,10 +1024,17 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         context.user_data["cad"] = cadastre
         
+        # ПОЛУЧАЕМ ПОЛНЫЙ АДРЕС ДЛЯ ПОДТВЕРЖДЕНИЯ
+        house_id = context.user_data.get("house_id")
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else ""
+        flat_number = context.user_data['flat']
+        
         confirm_text = (
+            f"🏘️ *{COMPLEX}*\n\n"
             f"📋 *Проверьте введенные данные:*\n\n"
-            f"🏠 Квартира: {context.user_data['flat']}\n"
-            f"📄 Кадастр: {cadastre}\n\n"
+            f"📍 Адрес: {house_address}\n"
+            f"🏠 Квартира: {flat_number}\n"
+            f"📄 Кадастр: `{cadastre}`\n\n"
             f"Всё верно?"
         )
         
@@ -1021,6 +1066,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 house_info = f"\n📍 {HOUSES[house_id]['address']}"
             
             app_text = (
+                f"🏘️ *{COMPLEX}*\n\n"
                 f"👤 Имя: {app.get('name', '—')}\n"
                 f"👨‍💻 Ник: @{app.get('username', '—')}\n"
                 f"🆔 ID: {uid}\n"
@@ -1076,12 +1122,13 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         
         stats_text = (
             f"📊 *Статистика заявок*\n\n"
+            f"🏘️ Комплекс: *{COMPLEX}*\n"
             f"📈 Всего заявок: *{total}*\n"
             f"⏳ На рассмотрении: *{pending}*\n"
             f"✅ Одобрено: *{approved}*\n"
             f"❌ Отклонено: *{rejected}*\n"
             f"⛔ Заблокировано: *{blocked}*\n"
-            f"🏘️ Домов настроено: *{len(HOUSES)}*"
+            f"🏠 Домов настроено: *{len(HOUSES)}*"
         )
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -1405,6 +1452,7 @@ async def handle_admin_callback(query, context, data, user):
                     
                     confirmation_text = (
                         f"⛔ *Пользователь заблокирован*\n"
+                        f"🏘️ Комплекс: {COMPLEX}\n"
                         f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
                         f"👨‍💻 Ник: @{target_user_nick}\n"
                         f"🆔 ID: {target_id}\n\n"
@@ -1445,6 +1493,7 @@ async def handle_admin_callback(query, context, data, user):
                     
                     confirmation_text = (
                         f"✅ *Пользователь разблокирован*\n"
+                        f"🏘️ Комплекс: {COMPLEX}\n"
                         f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
                         f"👨‍💻 Ник: @{target_user_nick}\n"
                         f"🆔 ID: {target_id}"
@@ -1614,7 +1663,8 @@ async def main_async() -> None:
     ensure_dirs()
     
     logger.info(f"🤖 Запуск Telegram бота версии {BOT_VERSION}")
-    logger.info(f"🏘️ Домов настроено: {len(HOUSES)}")
+    logger.info(f"🏘️ Название ЖК: {COMPLEX}")
+    logger.info(f"🏠 Домов настроено: {len(HOUSES)}")
     logger.info(f"🌐 HTTP порт: {HTTP_PORT}")
     
     # Запускаем HTTP сервер для UptimeRobot
@@ -1735,4 +1785,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
