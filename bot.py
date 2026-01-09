@@ -1331,14 +1331,13 @@ async def main_async() -> None:
             # Даем время предыдущим процессам завершиться
             await asyncio.sleep(2)
             
-            # Запускаем polling с параметрами, снижающими конфликты
+            # ЗАПУСКАЕМ POLLING БЕЗ read_timeout (не поддерживается в python-telegram-bot 22.3.0)
             await app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
-                poll_interval=2.0,
-                timeout=15,
-                bootstrap_retries=3,
-                read_timeout=10
+                poll_interval=2.0,  # Увеличиваем интервал между опросами
+                timeout=15,         # Увеличиваем timeout
+                bootstrap_retries=3  # Повторы при ошибке
             )
         except telegram.error.Conflict as e:
             logger.warning(f"⚠️ Обнаружен конфликт сессий: {e}")
@@ -1403,3 +1402,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
