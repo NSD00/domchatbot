@@ -260,13 +260,13 @@ def create_user_menu(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
         # Кнопка статуса на одной строке
         keyboard_buttons = [
             ["📋 Статус заявки"],
-            ["📨 Написать админу", "❓ Помощь"]
+            ["❓ Помощь", "📨 Написать админу"]
         ]
     else:
         # Кнопка подачи заявки на одной строке
         keyboard_buttons = [
             ["📝 Подать заявку"],
-            ["📨 Написать админу", "❓ Помощь"]
+            ["❓ Помощь", "📨 Написать админу"]
         ]
     
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
@@ -275,7 +275,7 @@ def create_user_menu_with_new_app() -> ReplyKeyboardMarkup:
     """Создает меню с кнопкой для новой заявки"""
     keyboard_buttons = [
         ["📝 Подать новую заявку"],
-        ["📨 Написать админу", "❓ Помощь"]
+        ["❓ Помощь", "📨 Написать админу"]
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
@@ -283,7 +283,7 @@ def create_user_menu_after_app_submission() -> ReplyKeyboardMarkup:
     """Создает меню после подачи заявки"""
     keyboard_buttons = [
         ["📋 Статус заявки"],
-        ["📨 Написать админу", "❓ Помощь"]
+        ["❓ Помощь", "📨 Написать админу"]
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
@@ -367,8 +367,9 @@ async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(
             "Напишите сообщение или прикрепите файл:\n\n"
             "📌 *Как отправить:*\n"
-            "Избегайте слов: зачем, почему, помощь, справка\n"
-            "Иначе будет выведена справочная информация",
+            "Избегайте слов: зачем, почему, помощь, справка.\n"
+            "Иначе бот будет выводить справочную информацию."
+            "ℹ️ Чтобы отменить отправку, напишите любое сообщение в один символ.",
             parse_mode="Markdown"
         )
 
@@ -678,8 +679,19 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["contact_data"] = {"text": "", "files": []}
         
         await update.message.reply_text(
-            "✉️ *Напишите ваше сообщение администратору:*",
+            "✉️ *Напишите ваше сообщение администратору:*\n\n"
+            "ℹ️ Чтобы отменить отправку, напишите любое сообщение в один символ.",
             parse_mode="Markdown"
+        )
+        return
+    
+    # Обработка отмены (сообщение в один символ)
+    if len(text) == 1 and context.user_data.get("step") == "contact":
+        context.user_data.clear()
+        await update.message.reply_text(
+            "❌ *Отправка сообщения отменена.*",
+            parse_mode="Markdown",
+            reply_markup=create_user_menu(user.id)
         )
         return
     
@@ -694,6 +706,26 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if step == "contact":
+        # Проверяем на отмену (сообщение в один символ)
+        if len(text) == 1:
+            context.user_data.clear()
+            # Удаляем временные файлы, если они есть
+            contact_data = context.user_data.get("contact_data", {})
+            if contact_data:
+                for file_path in contact_data.get("files", []):
+                    try:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+                    except:
+                        pass
+            
+            await update.message.reply_text(
+                "❌ *Отправка сообщения отменена.*",
+                parse_mode="Markdown",
+                reply_markup=create_user_menu(user.id)
+            )
+            return
+            
         context.user_data["contact_data"]["text"] = text
         await send_contact_message(update, context, user)
         return
@@ -894,6 +926,21 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # Проверяем, есть ли текст в сообщении (caption)
             text = update.message.caption or ""
             if text:
+                # Проверяем на команду отмены (сообщение в один символ)
+                if len(text.strip()) == 1:
+                    context.user_data.clear()
+                    # Удаляем временный файл
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+                    await update.message.reply_text(
+                        "❌ *Отправка сообщения отменена.*",
+                        parse_mode="Markdown",
+                        reply_markup=create_user_menu(user.id)
+                    )
+                    return
+                    
                 context.user_data["contact_data"]["text"] = text
                 # Если есть caption, сразу отправляем сообщение
                 await send_contact_message(update, context, user)
@@ -1357,6 +1404,18 @@ async def main_async() -> None:
         # Упрощенный обработчик для администраторских ответов
         async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = update.effective_user
+            text = update.message.text.strip()
+            
+            # Обработка отмены для пользователей (сообщение в один символ)
+            if len(text) == 1 and context.user_data.get("step") == "contact":
+                context.user_data.clear()
+                await update.message.reply_text(
+                    "❌ *Отправка сообщения отменена.*",
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu(user.id)
+                )
+                return
+            
             if is_admin(user.id) and ("rejecting_app" in context.chat_data or "replying_to_custom" in context.chat_data):
                 await handle_admin_reply(update, context)
         
