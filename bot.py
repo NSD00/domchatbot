@@ -98,15 +98,15 @@ REPLY_TEMPLATES = [
 HELP_TEXT = (
     "❓ *Зачем нужен кадастровый номер?*\n\n"
     "Кадастровый номер нужен для подтверждения проживания в доме.\n\n"
-    "📌 По кадастровому номеру *невозможно* узнать:\n"
+    "📌 По кадастровым номером *невозможно* узнать:\n"
     "🧾 ФИО, дату рождения, паспортные данные\n"
     "🔒 Данные *не дают* доступа к собственности\n"
     "👤 Их видит *только* администратор домового чата\n"
     "🗑 После сверки все данные *удаляются* автоматически!\n\n"
     "📋 *Кадастровый номер можно найти:*\n"
     "1. В выписке ЕГРН\n"
-    "2. Договорей купли-продажи\n"
-    "3. Договорей найма\n"
+    "2. Договоре купли-продажи\n"
+    "3. Договоре найма\n"
     "Если сомневаетесь, можете замазать все персональные данные."
 )
 
@@ -472,7 +472,7 @@ def cleanup_old_apps() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass
+                        pass
                 
                 del apps[uid]
                 removed_count += 1
@@ -628,7 +628,7 @@ async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     elif step == "cad":
         await update.message.reply_text(
-            "Введите кадастровой номер или отправьте файл:\n\n"
+            "Введите кадастровый номер или отправьте файл:\n\n"
             "📌 *Как вводить:*\n"
             "• Формат: XX:XX:XXXXXXX:XXX\n"
             "• Или отправьте фото/PDF документа",
@@ -639,7 +639,7 @@ async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "Напишите сообщение или прикрепите файл:\n\n"
             "📌 *Как отправить:*\n"
             "Избегайте слов: зачем, почему, помощь, справка.\n"
-            "Иначе бот будет выводить справочную информацию."
+            "Иначе бот будет выводить справочную информацию.\n"
             "ℹ️ Чтобы отменить отправку, напишите любое сообщение в один символ.",
             parse_mode="Markdown"
         )
@@ -657,10 +657,13 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
     
+    # Форматируем никнейм
+    username_display = f"@{user.username}" if user.username else "-"
+    
     full_contact_msg = (
         f"✉️ *Сообщение от пользователя:*\n\n"
         f"👤 Имя: {user.full_name}\n"
-        f"👨‍💻 Ник: {f'@{user.username}' if user.username else '-'}\n"
+        f"👨‍💻 Ник: {username_display}\n"
         f"🆔 ID: {user.id}\n\n"
         f"📝 Сообщение:\n{text if text else '(без текста)'}"
     )
@@ -786,12 +789,15 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
     if house_id and house_id in HOUSES:
         house_address = HOUSES[house_id]["address"]
     
+    # Форматируем никнейм
+    username_display = f"@{username}" if username else "-"
+    
     app_info = (
         f"🆕 *Новая заявка:*\n\n"
         f"🏘️ *{COMPLEX}*\n\n"
         f"🏠 Адрес: {house_address}, кв. {flat}\n\n"
         f"👤 Имя: {user_name if user_name else '-'}\n"
-        f"👨‍💻 Ник: {f'@{username}' if username else '-'}\n"
+        f"👨‍💻 Ник: {username_display}\n"
         f"🆔 ID: {user_id}\n"
         f"📄 Кадастр: `{cadastre}`"
     )
@@ -893,6 +899,10 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         if flat_display != '-':
             flat_display = f"кв. {flat_display}"
         
+        # Форматируем никнейм
+        username = user_data.get('username')
+        nick_display = f"@{username}" if username else "-"
+        
         for admin_id in ADMINS:
             try:
                 await context.bot.send_message(
@@ -901,7 +911,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
                     f"🏘️ {COMPLEX}\n"
                     f"🏠 Адрес: {house['address']}, {flat_display}\n"
                     f"👤 {user_data.get('name', '-')}\n"
-                    f"👨‍💻 Ник: {f'@{user_data.get(\"username\", \"\")}' if user_data.get('username') else '-'}\n"
+                    f"👨‍💻 Ник: {nick_display}\n"
                     f"🆔 {user_id}",
                     parse_mode="Markdown"
                 )
@@ -954,7 +964,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Проверяем, существует ли такой дом
         if house_param in HOUSES:
-            # ДА! Пользователь пришел по специальной ссылки
+            # ДА! Пользователь пришел по специальной ссылке
             context.user_data["house_id"] = house_param
             house_selected_from_link = True
             
@@ -982,7 +992,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"🏠 Адрес: {house['address']}\n\n"
                     f"Введите номер вашей квартиры:",
                     parse_mode="Markdown",
-                    reply_markup=create_user_menu_during_entry()  # ИЗМЕНЕНО: добавлены кнопки Помощь и Написать админу
+                    reply_markup=create_user_menu_during_entry()
                 )
             
             # Выходим из функции - дом уже выбран
@@ -1022,7 +1032,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(
                 welcome_text,
                 parse_mode="Markdown",
-                reply_markup=create_user_menu()  # Обычное меню
+                reply_markup=create_user_menu()
             )
             context.user_data["step"] = "select_house"
         else:
@@ -1038,7 +1048,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
                 parse_mode="Markdown",
-                reply_markup=create_user_menu()  # Обычное меню
+                reply_markup=create_user_menu()
             )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1168,7 +1178,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
                 parse_mode="Markdown",
-                reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
+                reply_markup=create_user_menu_during_entry()
             )
             return
         
@@ -1183,7 +1193,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             houses_text,
             parse_mode="Markdown",
-            reply_markup=create_user_menu()  # Обычное меню
+            reply_markup=create_user_menu()
         )
         context.user_data["step"] = "select_house"
         return
@@ -1202,17 +1212,17 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     f"✅ {house['address']}\n\n"
                     f"Введите номер квартиры:",
                     parse_mode="Markdown",
-                    reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
+                    reply_markup=create_user_menu_during_entry()
                 )
             else:
                 await update.message.reply_text(
                     f"❌ Введите число от 1 до {len(HOUSES)}",
-                    reply_markup=create_user_menu()  # Обычное меню
+                    reply_markup=create_user_menu()
                 )
         except ValueError:
             await update.message.reply_text(
                 "❌ Введите цифру",
-                reply_markup=create_user_menu()  # Обычное меню
+                reply_markup=create_user_menu()
             )
         return
     
@@ -1250,7 +1260,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "• Цифры с буквой в конце: 12А, 25Б, 7В\n\n"
                 "Пожалуйста, введите номер квартиры еще раз:",
                 parse_mode="Markdown",
-                reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
+                reply_markup=create_user_menu_during_entry()
             )
             return
         
@@ -1266,7 +1276,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"🏠 Адрес: {house_address}, кв. {text.strip()}\n\n"
             "📄 Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
             parse_mode="Markdown",
-            reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
+            reply_markup=create_user_menu_during_entry()
         )
         return
     
@@ -1280,7 +1290,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "`XX:XX:XXXXXXX:XXX`\n\n"
                 "Или отправьте файл документа с номером (фото/PDF).",
                 parse_mode="Markdown",
-                reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
+                reply_markup=create_user_menu_during_entry()
             )
             return
         
@@ -1326,10 +1336,14 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if house_id and house_id in HOUSES:
                 house_info = f"\n🏠 {HOUSES[house_id]['address']}"
             
+            # Форматируем никнейм
+            username = app.get('username')
+            nick_display = f"@{username}" if username else "-"
+            
             app_text = (
                 f"🏘️ *{COMPLEX}*\n\n"
                 f"👤 Имя: {app.get('name', '-')}\n"
-                f"👨‍💻 Ник: {f'@{app.get(\"username\")}' if app.get('username') else '-'}\n"
+                f"👨‍💻 Ник: {nick_display}\n"
                 f"🆔 ID: {uid}\n"
                 f"🏠 Квартира: {app.get('flat', '-')}{house_info}\n"
             )
@@ -1491,7 +1505,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await update.message.reply_text(
                     "✅ Файл получен. Теперь напишите текст сообщения:",
                     parse_mode="Markdown",
-                    reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
+                    reply_markup=create_user_menu_during_entry()
                 )
                 
         except Exception as e:
@@ -1732,12 +1746,15 @@ async def handle_admin_callback(query, context, data, user):
                     if house_id and house_id in HOUSES:
                         house_address = HOUSES[house_id]['address']
                     
+                    # Форматируем никнейм
+                    username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
+                    
                     confirmation_text = (
                         f"⛔ *Пользователь заблокирован:*\n"
                         f"🏘️ {COMPLEX}\n"
                         f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
                         f"👤 Имя: {apps[target_id].get('name', '-') if target_id in apps else '-'}\n"
-                        f"👨‍💻 Ник: {f'@{target_user_nick}' if target_user_nick and target_user_nick != '-' else '-'}\n"
+                        f"👨‍💻 Ник: {username_display}\n"
                         f"🆔 ID: {target_id}\n\n"
                         f"📝 Активная заявка автоматически отклонена."
                     )
@@ -1779,12 +1796,15 @@ async def handle_admin_callback(query, context, data, user):
                     if house_id and house_id in HOUSES:
                         house_address = HOUSES[house_id]['address']
                     
+                    # Форматируем никнейм
+                    username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
+                    
                     confirmation_text = (
                         f"✅ *Пользователь разблокирован:*\n"
                         f"🏘️ {COMPLEX}\n"
                         f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
                         f"👤 Имя: {apps[target_id].get('name', '-') if target_id in apps else '-'}\n"
-                        f"👨‍💻 Ник: {f'@{target_user_nick}' if target_user_nick and target_user_nick != '-' else '-'}\n"
+                        f"👨‍💻 Ник: {username_display}\n"
                         f"🆔 ID: {target_id}"
                     )
                     try:
