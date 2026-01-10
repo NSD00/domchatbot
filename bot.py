@@ -1440,8 +1440,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         blocked = len(load_json(BLACKLIST_FILE, []))
         
         stats_text = (
-            f"📊 *Статистика заявок:*\n\n"
-            f"🏘️ *{COMPLEX}*\n"
+            f"📊 *Статистика заявок {COMPLEX}:*\n\n"
             f"📈 Всего заявок: *{total}*\n"
             f"⏳ На рассмотрении: *{pending}*\n"
             f"✅ Одобрено: *{approved}*\n"
