@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.3.5"
+BOT_VERSION = "1.3.7"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -48,7 +48,6 @@ COMPLEX = os.getenv("COMPLEX", "Жилой комплекс")
 HOUSES = {}
 
 # Автоматически загружаем дома из переменных
-# Формат: HOUSE1=ул. Якоби, д. 15, CHAT1=https://t.me/...
 i = 1
 while True:
     house_address = os.getenv(f"HOUSE{i}")
@@ -105,7 +104,7 @@ HELP_TEXT = (
     "👤 Их видит *только* администратор домового чата\n"
     "🗑 После сверки все данные *удаляются* автоматически!\n\n"
     "📋 *Кадастровый номер можно найти:*\n"
-    "1. В Выписке ЕГРН\n"
+    "1. В выписке ЕГРН\n"
     "2. Договорей купли-продажи\n"
     "3. Договорей найма\n"
     "Если сомневаетесь, можете замазать все персональные данные."
@@ -551,6 +550,14 @@ def create_user_menu_after_app_submission() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
+def create_user_menu_during_entry() -> ReplyKeyboardMarkup:
+    """Создает меню во время ввода данных (с кнопкой Отмена)"""
+    keyboard_buttons = [
+        ["❌ Отмена"],
+        ["❓ Помощь", "📨 Написать админу"]
+    ]
+    return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
+
 ADMIN_MENU = ReplyKeyboardMarkup(
     [
         ["📋 Список заявок", "📊 Статистика"],
@@ -651,9 +658,9 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     full_contact_msg = (
-        f"✉️ *Сообщение от пользователя*\n\n"
+        f"✉️ *Сообщение от пользователя:*\n\n"
         f"👤 Имя: {user.full_name}\n"
-        f"👨‍💻 Ник: @{user.username if user.username else '—'}\n"
+        f"👨‍💻 Ник: {f'@{user.username}' if user.username else '-'}\n"
         f"🆔 ID: {user.id}\n\n"
         f"📝 Сообщение:\n{text if text else '(без текста)'}"
     )
@@ -766,7 +773,7 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
     
     # ПОЛУЧАЕМ ПОЛНЫЙ АДРЕС
     house_id = None
-    house_address = "—"
+    house_address = "-"
     
     # Ищем house_id в контексте пользователя или в заявках
     apps = load_json(APPS_FILE, {})
@@ -780,12 +787,11 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
         house_address = HOUSES[house_id]["address"]
     
     app_info = (
-        f"🏘️ *{COMPLEX}*\n\n"
         f"🆕 *Новая заявка:*\n\n"
-        f"📍 Адрес: {house_address}\n"
-        f"🏠 Квартира: {flat}\n\n"
-        f"👤 Имя: {user_name}\n"
-        f"👨‍💻 Ник: @{username if username else '—'}\n"
+        f"🏘️ *{COMPLEX}*\n\n"
+        f"🏠 Адрес: {house_address}, кв. {flat}\n\n"
+        f"👤 Имя: {user_name if user_name else '-'}\n"
+        f"👨‍💻 Ник: {f'@{username}' if username else '-'}\n"
         f"🆔 ID: {user_id}\n"
         f"📄 Кадастр: `{cadastre}`"
     )
@@ -864,16 +870,15 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
             flat_info = f"🏠 Квартира: {flat_info}\n"
         
         message = (
-            f"✅ *Заявка одобрена!*\n\n"
+            f"✅ *Заявка одобрена:*\n\n"
             f"🏘️ *{COMPLEX}*\n"
-            f"📍 {house['address']}\n"
-            f"{flat_info}\n"
+            f"🏠 Адрес: {house['address']}, кв. {user_data.get('flat', '')}\n"
             f"🔗 *Ссылка на чат дома:*\n"
             f"{house['chat_link']}\n\n"
-            f"1. Нажмите на ссылку\n"
-            f"2. Нажмите 'ВСТУПИТЬ'\n"
-            f"3. Ждите одобрения админа\n\n"
-            f"⚠️ Не передавайте ссылку"
+            f"1. Нажмите на ссылку.\n"
+            f"2. Нажмите \"Вступить\".\n"
+            f"3. Ждите одобрения админа.\n\n"
+            f"⚠️ Никому не передавайте ссылку!"
         )
         
         await context.bot.send_message(
@@ -884,19 +889,19 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         )
         
         # Простое уведомление админа
-        flat_display = user_data.get('flat', '—')
-        if flat_display != '—':
+        flat_display = user_data.get('flat', '-')
+        if flat_display != '-':
             flat_display = f"кв. {flat_display}"
         
         for admin_id in ADMINS:
             try:
                 await context.bot.send_message(
                     admin_id,
-                    f"📨 Отправлена ссылка\n"
+                    f"📨 Отправлена ссылка:\n"
                     f"🏘️ {COMPLEX}\n"
-                    f"📍 {house['address']}\n"
-                    f"👤 {user_data.get('name', '—')}\n"
-                    f"🏠 {flat_display}\n"
+                    f"🏠 Адрес: {house['address']}, {flat_display}\n"
+                    f"👤 {user_data.get('name', '-')}\n"
+                    f"👨‍💻 Ник: {f'@{user_data.get(\"username\", \"\")}' if user_data.get('username') else '-'}\n"
                     f"🆔 {user_id}",
                     parse_mode="Markdown"
                 )
@@ -958,7 +963,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update_info = (
                     f"👑 *Административная панель*\n"
                     f"🔄 Версия: `{BOT_VERSION}`\n"
-                    f"🏘️ Домов настроено: {len(HOUSES)}"
+                    f"🏘️ Домов: {len(HOUSES)}"
                 )
                 
                 await update.message.reply_text(
@@ -974,10 +979,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК В ПРИВЕТСТВИИ
                 await update.message.reply_text(
                     f"🏘️ *{COMPLEX}*\n"
-                    f"📍 {house['address']}\n\n"
+                    f"🏠 Адрес: {house['address']}\n\n"
                     f"Введите номер вашей квартиры:",
                     parse_mode="Markdown",
-                    reply_markup=ReplyKeyboardMarkup([["❌ Отмена"]], resize_keyboard=True)
+                    reply_markup=create_user_menu_during_entry()  # ИЗМЕНЕНО: добавлены кнопки Помощь и Написать админу
                 )
             
             # Выходим из функции - дом уже выбран
@@ -990,7 +995,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Версия: `{BOT_VERSION}`\n"
-            f"🏘️ Домов настроено: {len(HOUSES)}"
+            f"🏘️ Домов: {len(HOUSES)}"
         )
         
         await update.message.reply_text(
@@ -1002,10 +1007,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Если несколько домов И пользователь без специальной ссылки
         if len(HOUSES) > 1:
             welcome_text = (
-                f"🏘️ *{COMPLEX}*\n\n"
                 "👋 *Добро пожаловать!*\n\n"
+                f"🏘️ *{COMPLEX}*\n\n"
                 "ℹ️ *Как подать заявку:*\n"
-                "1. Используйте QR-код в вашем подъезде\n"
+                "1. Используйте QR-код в вашем подъезде.\n"
                 "2. Или выберите ваш дом:\n\n"
             )
             
@@ -1016,7 +1021,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             await update.message.reply_text(
                 welcome_text,
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=create_user_menu()  # Обычное меню
             )
             context.user_data["step"] = "select_house"
         else:
@@ -1029,9 +1035,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК В ПРИВЕТСТВИИ
             await update.message.reply_text(
                 f"🏘️ *{COMPLEX}*\n"
-                f"📍 {house['address']}\n\n"
+                f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=create_user_menu()  # Обычное меню
             )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1088,7 +1095,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        status_msg = f"📋 *Ваша заявка*\n\n🏠 Квартира: {user_app.get('flat', '—')}\n📌 Статус: {user_app.get('status', '—')}"
+        status_msg = f"📋 *Ваша заявка*\n\n🏠 Квартира: {user_app.get('flat', '-')}\n📌 Статус: {user_app.get('status', '-')}"
         
         if user_app.get("reject_reason"):
             status_msg += f"\n\n*Причина отклонения:*\n{user_app['reject_reason']}"
@@ -1128,6 +1135,16 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     
+    # Обработка отмены через кнопку
+    if text == "❌ Отмена":
+        context.user_data.clear()
+        await update.message.reply_text(
+            "❌ *Ввод данных отменен.*",
+            parse_mode="Markdown",
+            reply_markup=create_user_menu(user.id)
+        )
+        return
+    
     if text == "📝 Подать заявку" or text == "📝 Подать новую заявку":
         context.user_data.clear()
         
@@ -1148,9 +1165,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             house = HOUSES[house_id]
             await update.message.reply_text(
                 f"🏘️ *{COMPLEX}*\n"
-                f"📍 {house['address']}\n\n"
+                f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
             )
             return
         
@@ -1164,7 +1182,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         await update.message.reply_text(
             houses_text,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=create_user_menu()  # Обычное меню
         )
         context.user_data["step"] = "select_house"
         return
@@ -1182,14 +1201,19 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await update.message.reply_text(
                     f"✅ {house['address']}\n\n"
                     f"Введите номер квартиры:",
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
                 )
             else:
                 await update.message.reply_text(
-                    f"❌ Введите число от 1 до {len(HOUSES)}"
+                    f"❌ Введите число от 1 до {len(HOUSES)}",
+                    reply_markup=create_user_menu()  # Обычное меню
                 )
         except ValueError:
-            await update.message.reply_text("❌ Введите цифру")
+            await update.message.reply_text(
+                "❌ Введите цифру",
+                reply_markup=create_user_menu()  # Обычное меню
+            )
         return
     
     if step == "contact":
@@ -1225,7 +1249,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "• Только цифры: 12, 105, 25\n"
                 "• Цифры с буквой в конце: 12А, 25Б, 7В\n\n"
                 "Пожалуйста, введите номер квартиры еще раз:",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
             )
             return
         
@@ -1234,14 +1259,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК ПРИ ЗАПРОСЕ КАДАСТРА
         house_id = context.user_data.get("house_id")
-        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else ""
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         
         await update.message.reply_text(
             f"🏘️ *{COMPLEX}*\n"
-            f"📍 {house_address}\n"
-            f"🏠 Квартира: {text.strip()}\n\n"
-            "📄 Введите кадастровый номер или отправьте файл (фото/PDF):",
-            parse_mode="Markdown"
+            f"🏠 Адрес: {house_address}, кв. {text.strip()}\n\n"
+            "📄 Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+            parse_mode="Markdown",
+            reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
         )
         return
     
@@ -1253,8 +1278,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "❌ *Не удалось распознать кадастровый номер.*\n\n"
                 "Введите номер в формате:\n"
                 "`XX:XX:XXXXXXX:XXX`\n\n"
-                "Или отправьте фото/PDF документа с номером.",
-                parse_mode="Markdown"
+                "Или отправьте файл документа с номером (фото/PDF).",
+                parse_mode="Markdown",
+                reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
             )
             return
         
@@ -1262,14 +1288,13 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         # ПОЛУЧАЕМ ПОЛНЫЙ АДРЕС ДЛЯ ПОДТВЕРЖДЕНИЯ
         house_id = context.user_data.get("house_id")
-        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else ""
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         flat_number = context.user_data['flat']
         
         confirm_text = (
-            f"🏘️ *{COMPLEX}*\n\n"
             f"📋 *Проверьте введенные данные:*\n\n"
-            f"📍 Адрес: {house_address}\n"
-            f"🏠 Квартира: {flat_number}\n"
+            f"🏘️ *{COMPLEX}*\n\n"
+            f"🏠 Адрес: {house_address}, кв. {flat_number}\n"
             f"📄 Кадастр: `{cadastre}`\n\n"
             f"Всё верно?"
         )
@@ -1299,14 +1324,14 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             house_info = ""
             house_id = app.get("house_id")
             if house_id and house_id in HOUSES:
-                house_info = f"\n📍 {HOUSES[house_id]['address']}"
+                house_info = f"\n🏠 {HOUSES[house_id]['address']}"
             
             app_text = (
                 f"🏘️ *{COMPLEX}*\n\n"
-                f"👤 Имя: {app.get('name', '—')}\n"
-                f"👨‍💻 Ник: @{app.get('username', '—')}\n"
+                f"👤 Имя: {app.get('name', '-')}\n"
+                f"👨‍💻 Ник: {f'@{app.get(\"username\")}' if app.get('username') else '-'}\n"
                 f"🆔 ID: {uid}\n"
-                f"🏠 Квартира: {app.get('flat', '—')}{house_info}\n"
+                f"🏠 Квартира: {app.get('flat', '-')}{house_info}\n"
             )
             
             if app.get("cadastre"):
@@ -1314,7 +1339,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 app_text += "\n"
             
-            app_text += f"📌 Статус: {app.get('status', '—')}"
+            app_text += f"📌 Статус: {app.get('status', '-')}"
             
             if app.get("reject_reason") and app.get("status") == STATUS_TEXT["rejected"]:
                 app_text += f"\n\n*Причина отклонения:*\n{app['reject_reason']}"
@@ -1364,7 +1389,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ Одобрено: *{approved}*\n"
             f"❌ Отклонено: *{rejected}*\n"
             f"⛔ Заблокировано: *{blocked}*\n"
-            f"🏠 Домов настроено: *{len(HOUSES)}*"
+            f"🏠 Домов: *{len(HOUSES)}*"
         )
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -1465,7 +1490,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 # Если нет caption, просим добавить текст
                 await update.message.reply_text(
                     "✅ Файл получен. Теперь напишите текст сообщения:",
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu_during_entry()  # Меню с кнопкой Отмена
                 )
                 
         except Exception as e:
@@ -1526,7 +1552,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Уведомляем администраторов
         await notify_admins_about_new_app(
             context, user.id, user.full_name, user.username,
-            context.user_data.get('flat', '—'), context.user_data.get('cad', '—'), file_path
+            context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
         )
         
         context.user_data.clear()
@@ -1673,9 +1699,11 @@ async def handle_admin_callback(query, context, data, user):
         # Получаем информацию о пользователе
         target_user_info = ""
         target_user_nick = ""
+        house_id = ""
         if target_id in apps:
             target_user_info = f" ({apps[target_id].get('name', 'ID: ' + target_id)})"
-            target_user_nick = apps[target_id].get('username', '—')
+            target_user_nick = apps[target_id].get('username', '-')
+            house_id = apps[target_id].get('house_id', '')
         
         if action == "block":
             if target_id_int not in blacklist:
@@ -1699,11 +1727,17 @@ async def handle_admin_callback(query, context, data, user):
                         apps[target_id]["reject_reason"] = "⛔ Пользователь заблокирован"
                         save_json_with_backup(APPS_FILE, apps)
                     
+                    # Получаем адрес дома
+                    house_address = "-"
+                    if house_id and house_id in HOUSES:
+                        house_address = HOUSES[house_id]['address']
+                    
                     confirmation_text = (
-                        f"⛔ *Пользователь заблокирован*\n"
-                        f"🏘️ Комплекс: {COMPLEX}\n"
-                        f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
-                        f"👨‍💻 Ник: @{target_user_nick}\n"
+                        f"⛔ *Пользователь заблокирован:*\n"
+                        f"🏘️ {COMPLEX}\n"
+                        f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
+                        f"👤 Имя: {apps[target_id].get('name', '-') if target_id in apps else '-'}\n"
+                        f"👨‍💻 Ник: {f'@{target_user_nick}' if target_user_nick and target_user_nick != '-' else '-'}\n"
                         f"🆔 ID: {target_id}\n\n"
                         f"📝 Активная заявка автоматически отклонена."
                     )
@@ -1740,11 +1774,17 @@ async def handle_admin_callback(query, context, data, user):
                     except Exception as e:
                         logger.error(f"Ошибка отправки уведомления о разблокировке пользователю {target_id}: {e}")
                     
+                    # Получаем адрес дома
+                    house_address = "-"
+                    if house_id and house_id in HOUSES:
+                        house_address = HOUSES[house_id]['address']
+                    
                     confirmation_text = (
-                        f"✅ *Пользователь разблокирован*\n"
-                        f"🏘️ Комплекс: {COMPLEX}\n"
-                        f"👤 Имя: {apps[target_id].get('name', '—') if target_id in apps else '—'}\n"
-                        f"👨‍💻 Ник: @{target_user_nick}\n"
+                        f"✅ *Пользователь разблокирован:*\n"
+                        f"🏘️ {COMPLEX}\n"
+                        f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
+                        f"👤 Имя: {apps[target_id].get('name', '-') if target_id in apps else '-'}\n"
+                        f"👨‍💻 Ник: {f'@{target_user_nick}' if target_user_nick and target_user_nick != '-' else '-'}\n"
                         f"🆔 ID: {target_id}"
                     )
                     try:
