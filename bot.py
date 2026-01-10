@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.3.8"
+BOT_VERSION = "1.3.9"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -740,7 +740,7 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 async def process_rejection(context, app_id, reason, query=None) -> bool:
-    """Обработка отклонения заявки"""
+    """Обработка отклонения заявки с обновлением сообщения"""
     apps = load_json(APPS_FILE, {})
     
     if app_id in apps:
@@ -760,12 +760,40 @@ async def process_rejection(context, app_id, reason, query=None) -> bool:
                 logger.error(f"Ошибка отправки уведомления об отклонении пользователю {app_id}: {e}")
             
             if query:
+                # Получаем информацию о заявке для отображения
+                app = apps[app_id]
+                house_address = "-"
+                house_id = app.get("house_id")
+                if house_id and house_id in HOUSES:
+                    house_address = HOUSES[house_id]["address"]
+                
+                user_name = app.get('name', '-')
+                username = app.get('username')
+                nick_display = f"@{username}" if username else "-"
+                
+                updated_text = (
+                    f"❌ *ЗАЯВКА ОТКЛОНЕНА*\n\n"
+                    f"📝 *Заявка:*\n"
+                    f"🏘️ *{COMPLEX}*\n"
+                    f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
+                    f"👤 Имя: {user_name}\n"
+                    f"👨‍💻 Ник: {nick_display}\n"
+                    f"🆔 ID: {app_id}\n"
+                    f"📄 Кадастр: `{app.get('cadastre', '-')}`\n\n"
+                    f"📌 Статус: {STATUS_TEXT['rejected']}\n"
+                    f"📋 Причина: {reason}"
+                )
+                
                 try:
-                    await query.edit_message_text(f"✅ *Заявка отклонена.*\nПричина: {reason}", parse_mode="Markdown")
-                except:
+                    await query.edit_message_text(
+                        updated_text,
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка обновления сообщения: {e}")
                     await context.bot.send_message(
                         query.from_user.id,
-                        f"✅ *Заявка отклонена.*\nПричина: {reason}",
+                        updated_text,
                         parse_mode="Markdown"
                     )
             
@@ -965,7 +993,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Проверяем, существует ли такой дом
         if house_param in HOUSES:
-            # ДА! Пользователь пришел по специальной ссылке
+            # ДА! Пользователь пришел по специальной ссылки
             context.user_data["house_id"] = house_param
             house_selected_from_link = True
             
@@ -1616,8 +1644,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
         )
         
-        # Показываем пользователю его заявку
-        await update.message.reply_text(
+        # Показываем пользователю его заявку (сохраняем message_id для цитаты)
+        main_message = await update.message.reply_text(
             f"✅ *Заявка отправлена на рассмотрение!*\n\n"
             f"📝 *Ваша заявка:*\n"
             f"🏘️ *{COMPLEX}*\n"
@@ -1628,19 +1656,24 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=create_user_menu_after_app_submission()
         )
         
-        # Совет про имя и ник (только если чего-то не хватает)
+        # Совет про имя и ник (цитатой, только если чего-то не хватает)
         if not user.full_name or not user.username:
             advice_msg = (
                 "💡 *Совет для будущих заявок:*\n\n"
                 "Администраторам проще проверить заявки, "
                 "когда указаны *Имя* и *Телеграм ник*.\n\n"
-                "Такие заявки часто рассматриваются быстрее. "
-                    "Учтите на будущее! 👍\n\n"
-                    "📌 *Как добавить:*\n"
-                    "1. В настройках Telegram укажите Имя\n"
-                    "2. Установите Username (@ваш_ник)"
+                "Такие заявки часто рассматриваются быстрее.\n\n"
+                "Учтите на будущее! 👍\n\n"
+                "📌 *Как добавить:*\n"
+                "1. В настройках Telegram укажите Имя\n"
+                "2. Установите Username (@ваш_ник)"
             )
-            await context.bot.send_message(user.id, advice_msg, parse_mode="Markdown")
+            await context.bot.send_message(
+                user.id, 
+                advice_msg, 
+                parse_mode="Markdown",
+                reply_to_message_id=main_message.message_id  # Цитата
+            )
         
         context.user_data.clear()
     else:
@@ -1684,19 +1717,24 @@ async def handle_user_callback(query, context, data, user):
                 parse_mode="Markdown"
             )
             
-            # Совет про имя и ник (только если чего-то не хватает)
+            # Совет про имя и ник (цитатой, только если чего-то не хватает)
             if not user.full_name or not user.username:
                 advice_msg = (
                     "💡 *Совет для будущих заявок:*\n\n"
                     "Администраторам проще проверить заявки, "
                     "когда указаны *Имя* и *Телеграм ник*.\n\n"
-                    "Такие заявки часто рассматриваются быстрее. "
+                    "Такие заявки часто рассматриваются быстрее.\n\n"
                     "Учтите на будущее! 👍\n\n"
                     "📌 *Как добавить:*\n"
                     "1. В настройках Telegram укажите Имя\n"
                     "2. Установите Username (@ваш_ник)"
                 )
-                await context.bot.send_message(user.id, advice_msg, parse_mode="Markdown")
+                await context.bot.send_message(
+                    user.id,
+                    advice_msg,
+                    parse_mode="Markdown",
+                    reply_to_message_id=query.message.message_id  # Цитата предыдущего сообщения
+                )
             
             # Отправляем меню с кнопкой статуса
             await context.bot.send_message(
@@ -1724,16 +1762,56 @@ async def handle_admin_callback(query, context, data, user):
     # Обработка отмены действий
     if data.startswith("cancel:"):
         try:
-            await query.edit_message_text("↩️ Действие отменено.")
+            # Получаем оригинальный текст сообщения
+            original_text = query.message.text
+            
+            # Убираем разметку если нужно
+            if "Выберите причину отклонения" in original_text or "Выберите типовой ответ" in original_text:
+                # Находим первую строку с информацией о заявке
+                lines = original_text.split('\n')
+                new_text = ""
+                for line in lines:
+                    if "Заявка:" in line or "Адрес:" in line or "Имя:" in line or "ID:" in line or "Кадастр:" in line:
+                        if not new_text:
+                            new_text = "↩️ Действие отменено\n\n"
+                        new_text += line + "\n"
+                
+                if new_text:
+                    await query.edit_message_text(
+                        new_text.strip(),
+                        parse_mode="Markdown"
+                    )
+                else:
+                    await query.edit_message_text("↩️ Действие отменено")
+            else:
+                await query.edit_message_text("↩️ Действие отменено")
         except:
-            await context.bot.send_message(user.id, "↩️ Действие отменено.")
+            try:
+                await query.edit_message_text("↩️ Действие отменено")
+            except:
+                await context.bot.send_message(user.id, "↩️ Действие отменено")
         return
     
     if data.startswith("cancel_reply:"):
         try:
-            await query.edit_message_text("↩️ Ответ отменен.")
+            original_text = query.message.text
+            lines = original_text.split('\n')
+            new_text = ""
+            for line in lines:
+                if "Заявка:" in line or "Адрес:" in line or "Имя:" in line or "ID:" in line or "Кадастр:" in line:
+                    if not new_text:
+                        new_text = "↩️ Ответ отменен\n\n"
+                    new_text += line + "\n"
+            
+            if new_text:
+                await query.edit_message_text(
+                    new_text.strip(),
+                    parse_mode="Markdown"
+                )
+            else:
+                await query.edit_message_text("↩️ Ответ отменен")
         except:
-            await context.bot.send_message(user.id, "↩️ Ответ отменен.")
+            await query.edit_message_text("↩️ Ответ отменен")
         return
     
     # Разбираем callback_data
@@ -1780,14 +1858,53 @@ async def handle_admin_callback(query, context, data, user):
                             f"✉️ *Сообщение от администратора:*\n\n{reply_text}",
                             parse_mode="Markdown"
                         )
-                        try:
-                            await query.edit_message_text(f"✅ *Ответ отправлен.*\n\n{reply_text}", parse_mode="Markdown")
-                        except:
-                            await context.bot.send_message(
-                                user.id,
-                                f"✅ *Ответ отправлен.*\n\n{reply_text}",
-                                parse_mode="Markdown"
+                        
+                        # Обновляем сообщение вместо простого ответа
+                        apps = load_json(APPS_FILE, {})
+                        if target_id in apps:
+                            app = apps[target_id]
+                            house_address = "-"
+                            house_id = app.get("house_id")
+                            if house_id and house_id in HOUSES:
+                                house_address = HOUSES[house_id]["address"]
+                            
+                            user_name = app.get('name', '-')
+                            username = app.get('username')
+                            nick_display = f"@{username}" if username else "-"
+                            
+                            updated_text = (
+                                f"✉️ *ОТВЕТ ОТПРАВЛЕН*\n\n"
+                                f"📝 *Заявка:*\n"
+                                f"🏘️ *{COMPLEX}*\n"
+                                f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
+                                f"👤 Имя: {user_name}\n"
+                                f"👨‍💻 Ник: {nick_display}\n"
+                                f"🆔 ID: {target_id}\n"
+                                f"📄 Кадастр: `{app.get('cadastre', '-')}`\n\n"
+                                f"📌 Статус: {app.get('status', '-')}\n"
+                                f"💬 Ответ: {reply_text}"
                             )
+                            
+                            try:
+                                await query.edit_message_text(
+                                    updated_text,
+                                    parse_mode="Markdown"
+                                )
+                            except:
+                                await context.bot.send_message(
+                                    user.id,
+                                    updated_text,
+                                    parse_mode="Markdown"
+                                )
+                        else:
+                            try:
+                                await query.edit_message_text(f"✅ *Ответ отправлен.*\n\n{reply_text}", parse_mode="Markdown")
+                            except:
+                                await context.bot.send_message(
+                                    user.id,
+                                    f"✅ *Ответ отправлен.*\n\n{reply_text}",
+                                    parse_mode="Markdown"
+                                )
                     except Exception as e:
                         try:
                             await query.edit_message_text(f"❌ Не удалось отправить сообщение: {e}")
@@ -1845,12 +1962,14 @@ async def handle_admin_callback(query, context, data, user):
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
                     confirmation_text = (
-                        f"⛔ *Пользователь заблокирован:*\n"
-                        f"🏘️ {COMPLEX}\n"
-                        f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
+                        f"⛔ *ПОЛЬЗОВАТЕЛЬ ЗАБЛОКИРОВАН*\n\n"
+                        f"📝 *Заявка:*\n"
+                        f"🏘️ *{COMPLEX}*\n"
+                        f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n\n"
                         f"👤 Имя: {user_name}\n"
                         f"👨‍💻 Ник: {username_display}\n"
-                        f"🆔 ID: {target_id}\n\n"
+                        f"🆔 ID: {target_id}\n"
+                        f"📄 Кадастр: `{apps[target_id].get('cadastre', '-') if target_id in apps else '-'}`\n\n"
                         f"📝 Активная заявка автоматически отклонена."
                     )
                     try:
@@ -1896,12 +2015,14 @@ async def handle_admin_callback(query, context, data, user):
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
                     confirmation_text = (
-                        f"✅ *Пользователь разблокирован:*\n"
-                        f"🏘️ {COMPLEX}\n"
-                        f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
+                        f"✅ *ПОЛЬЗОВАТЕЛЬ РАЗБЛОКИРОВАН*\n\n"
+                        f"📝 *Заявка:*\n"
+                        f"🏘️ *{COMPLEX}*\n"
+                        f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n\n"
                         f"👤 Имя: {user_name}\n"
                         f"👨‍💻 Ник: {username_display}\n"
-                        f"🆔 ID: {target_id}"
+                        f"🆔 ID: {target_id}\n"
+                        f"📄 Кадастр: `{apps[target_id].get('cadastre', '-') if target_id in apps else '-'}`"
                     )
                     try:
                         await query.edit_message_text(confirmation_text, parse_mode="Markdown")
@@ -1932,15 +2053,43 @@ async def handle_admin_callback(query, context, data, user):
                         apps[target_id]
                     )
                     
-                    # Простое подтверждение админу
+                    # Обновляем сообщение вместо простого ответа
+                    app = apps[target_id]
+                    house_address = "-"
+                    house_id = app.get("house_id")
+                    if house_id and house_id in HOUSES:
+                        house_address = HOUSES[house_id]["address"]
+                    
+                    user_name = app.get('name', '-')
+                    username = app.get('username')
+                    nick_display = f"@{username}" if username else "-"
+                    
+                    updated_text = (
+                        f"✅ *ЗАЯВКА ОДОБРЕНА*\n\n"
+                        f"📝 *Заявка:*\n"
+                        f"🏘️ *{COMPLEX}*\n"
+                        f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
+                        f"👤 Имя: {user_name}\n"
+                        f"👨‍💻 Ник: {nick_display}\n"
+                        f"🆔 ID: {target_id}\n"
+                        f"📄 Кадастр: `{app.get('cadastre', '-')}`\n\n"
+                        f"📌 Статус: {STATUS_TEXT['approved']}"
+                    )
+                    
                     if success:
+                        updated_text += f"\n\n📨 Ссылка отправлена пользователю"
+                    else:
+                        updated_text += f"\n\n⚠️ Ошибка отправки ссылки"
+                    
+                    try:
                         await query.edit_message_text(
-                            f"✅ Заявка одобрена. Ссылка отправлена.",
+                            updated_text,
                             parse_mode="Markdown"
                         )
-                    else:
-                        await query.edit_message_text(
-                            f"✅ Заявка одобрена, но ошибка отправки ссылки.",
+                    except:
+                        await context.bot.send_message(
+                            user.id,
+                            updated_text,
                             parse_mode="Markdown"
                         )
                 else:
@@ -2034,8 +2183,36 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Обработка своей причины отклонения
     if "rejecting_app" in context.chat_data:
         app_id = context.chat_data["rejecting_app"]
-        if await process_rejection(context, app_id, text):
-            await update.message.reply_text(f"✅ *Заявка отклонена.*\nПричина: {text}", parse_mode="Markdown")
+        if await process_rejection(context, app_id, text, None):
+            # Получаем информацию о заявке для отображения
+            apps = load_json(APPS_FILE, {})
+            if app_id in apps:
+                app = apps[app_id]
+                house_address = "-"
+                house_id = app.get("house_id")
+                if house_id and house_id in HOUSES:
+                    house_address = HOUSES[house_id]["address"]
+                
+                user_name = app.get('name', '-')
+                username = app.get('username')
+                nick_display = f"@{username}" if username else "-"
+                
+                updated_text = (
+                    f"❌ *ЗАЯВКА ОТКЛОНЕНА*\n\n"
+                    f"📝 *Заявка:*\n"
+                    f"🏘️ *{COMPLEX}*\n"
+                    f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
+                    f"👤 Имя: {user_name}\n"
+                    f"👨‍💻 Ник: {nick_display}\n"
+                    f"🆔 ID: {app_id}\n"
+                    f"📄 Кадастр: `{app.get('cadastre', '-')}`\n\n"
+                    f"📌 Статус: {STATUS_TEXT['rejected']}\n"
+                    f"📋 Причина: {text}"
+                )
+                
+                await update.message.reply_text(updated_text, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"✅ *Заявка отклонена.*\nПричина: {text}", parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Ошибка при отклонении заявки.")
         context.chat_data.pop("rejecting_app", None)
@@ -2051,7 +2228,36 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 f"✉️ *Сообщение от администратора:*\n\n{text}",
                 parse_mode="Markdown"
             )
-            await update.message.reply_text(f"✅ *Ответ отправлен.*\n\n{text}", parse_mode="Markdown")
+            
+            # Обновляем сообщение вместо простого ответа
+            apps = load_json(APPS_FILE, {})
+            if target_id in apps:
+                app = apps[target_id]
+                house_address = "-"
+                house_id = app.get("house_id")
+                if house_id and house_id in HOUSES:
+                    house_address = HOUSES[house_id]["address"]
+                
+                user_name = app.get('name', '-')
+                username = app.get('username')
+                nick_display = f"@{username}" if username else "-"
+                
+                updated_text = (
+                    f"✉️ *ОТВЕТ ОТПРАВЛЕН*\n\n"
+                    f"📝 *Заявка:*\n"
+                    f"🏘️ *{COMPLEX}*\n"
+                    f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
+                    f"👤 Имя: {user_name}\n"
+                    f"👨‍💻 Ник: {nick_display}\n"
+                    f"🆔 ID: {target_id}\n"
+                    f"📄 Кадастр: `{app.get('cadastre', '-')}`\n\n"
+                    f"📌 Статус: {app.get('status', '-')}\n"
+                    f"💬 Ответ: {text}"
+                )
+                
+                await update.message.reply_text(updated_text, parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"✅ *Ответ отправлен.*\n\n{text}", parse_mode="Markdown")
         except Exception as e:
             await update.message.reply_text(f"❌ Не удалось отправить сообщение: {e}")
         
