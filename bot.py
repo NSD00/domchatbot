@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.3.7"
+BOT_VERSION = "1.3.8"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -628,17 +628,17 @@ async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     elif step == "cad":
         await update.message.reply_text(
-            "Введите кадастровый номер или отправьте файл:\n\n"
+            "Введите кадастровый номер:\n\n"
             "📌 *Как вводить:*\n"
             "• Формат: XX:XX:XXXXXXX:XXX\n"
-            "• Или отправьте фото/PDF документа",
+            "• Или отправьте файл документа с номером (фото/PDF)",
             parse_mode="Markdown"
         )
     elif step == "contact":
         await update.message.reply_text(
             "Напишите сообщение или прикрепите файл:\n\n"
             "📌 *Как отправить:*\n"
-            "Избегайте слов: зачем, почему, помощь, справка.\n"
+            "Избегайте слов: зачем, почему, помощь, справка, кадастр.\n"
             "Иначе бот будет выводить справочную информацию.\n"
             "ℹ️ Чтобы отменить отправку, напишите любое сообщение в один символ.",
             parse_mode="Markdown"
@@ -657,12 +657,13 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
     
-    # Форматируем никнейм
+    # Форматируем имя и ник
+    user_name = user.full_name if user.full_name else "-"
     username_display = f"@{user.username}" if user.username else "-"
     
     full_contact_msg = (
         f"✉️ *Сообщение от пользователя:*\n\n"
-        f"👤 Имя: {user.full_name}\n"
+        f"👤 Имя: {user_name}\n"
         f"👨‍💻 Ник: {username_display}\n"
         f"🆔 ID: {user.id}\n\n"
         f"📝 Сообщение:\n{text if text else '(без текста)'}"
@@ -789,14 +790,15 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
     if house_id and house_id in HOUSES:
         house_address = HOUSES[house_id]["address"]
     
-    # Форматируем никнейм
+    # Форматируем имя и ник
+    display_name = user_name if user_name else "-"
     username_display = f"@{username}" if username else "-"
     
     app_info = (
         f"🆕 *Новая заявка:*\n\n"
-        f"🏘️ *{COMPLEX}*\n\n"
+        f"🏘️ *{COMPLEX}*\n"
         f"🏠 Адрес: {house_address}, кв. {flat}\n\n"
-        f"👤 Имя: {user_name if user_name else '-'}\n"
+        f"👤 Имя: {display_name}\n"
         f"👨‍💻 Ник: {username_display}\n"
         f"🆔 ID: {user_id}\n"
         f"📄 Кадастр: `{cadastre}`"
@@ -870,10 +872,10 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
             )
             return False
         
-        # ПРОСТОЕ СООБЩЕНИЕ
-        flat_info = user_data.get("flat", "")
-        if flat_info:
-            flat_info = f"🏠 Квартира: {flat_info}\n"
+        # Форматируем имя и ник
+        user_name = user_data.get('name', '-')
+        username = user_data.get('username')
+        nick_display = f"@{username}" if username else "-"
         
         message = (
             f"✅ *Заявка одобрена:*\n\n"
@@ -899,10 +901,6 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         if flat_display != '-':
             flat_display = f"кв. {flat_display}"
         
-        # Форматируем никнейм
-        username = user_data.get('username')
-        nick_display = f"@{username}" if username else "-"
-        
         for admin_id in ADMINS:
             try:
                 await context.bot.send_message(
@@ -910,7 +908,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
                     f"📨 Отправлена ссылка:\n"
                     f"🏘️ {COMPLEX}\n"
                     f"🏠 Адрес: {house['address']}, {flat_display}\n"
-                    f"👤 {user_data.get('name', '-')}\n"
+                    f"👤 Имя: {user_name}\n"
                     f"👨‍💻 Ник: {nick_display}\n"
                     f"🆔 {user_id}",
                     parse_mode="Markdown"
@@ -986,8 +984,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 house = HOUSES[house_param]
                 context.user_data["step"] = "flat"
                 
-                # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК В ПРИВЕТСТВИИ
                 await update.message.reply_text(
+                    f"📝 *Заявка:*\n"
                     f"🏘️ *{COMPLEX}*\n"
                     f"🏠 Адрес: {house['address']}\n\n"
                     f"Введите номер вашей квартиры:",
@@ -1042,8 +1040,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
-            # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК В ПРИВЕТСТВИИ
             await update.message.reply_text(
+                f"📝 *Заявка:*\n"
                 f"🏘️ *{COMPLEX}*\n"
                 f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
@@ -1105,7 +1103,20 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        status_msg = f"📋 *Ваша заявка*\n\n🏠 Квартира: {user_app.get('flat', '-')}\n📌 Статус: {user_app.get('status', '-')}"
+        # Получаем адрес дома
+        house_id = user_app.get("house_id")
+        house_address = "-"
+        if house_id and house_id in HOUSES:
+            house_address = HOUSES[house_id]["address"]
+        
+        status_msg = (
+            f"📋 *Статус заявки:*\n\n"
+            f"📝 *Заявка:*\n"
+            f"🏘️ *{COMPLEX}*\n"
+            f"🏠 Адрес: {house_address}, кв. {user_app.get('flat', '-')}\n"
+            f"📄 Кадастровый номер: {user_app.get('cadastre', '-')}\n"
+            f"📌 Статус: {user_app.get('status', '-')}"
+        )
         
         if user_app.get("reject_reason"):
             status_msg += f"\n\n*Причина отклонения:*\n{user_app['reject_reason']}"
@@ -1174,6 +1185,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             
             house = HOUSES[house_id]
             await update.message.reply_text(
+                f"📝 *Заявка:*\n"
                 f"🏘️ *{COMPLEX}*\n"
                 f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
@@ -1267,14 +1279,15 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["flat"] = text.strip()
         context.user_data["step"] = "cad"
         
-        # ПОКАЗЫВАЕМ НАЗВАНИЕ ЖК ПРИ ЗАПРОСЕ КАДАСТРА
+        # ПОЛУЧАЕМ АДРЕС ДОМА
         house_id = context.user_data.get("house_id")
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         
         await update.message.reply_text(
+            f"📝 *Заявка:*\n"
             f"🏘️ *{COMPLEX}*\n"
             f"🏠 Адрес: {house_address}, кв. {text.strip()}\n\n"
-            "📄 Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+            "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
             parse_mode="Markdown",
             reply_markup=create_user_menu_during_entry()
         )
@@ -1303,9 +1316,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         confirm_text = (
             f"📋 *Проверьте введенные данные:*\n\n"
-            f"🏘️ *{COMPLEX}*\n\n"
+            f"📝 *Заявка:*\n"
+            f"🏘️ *{COMPLEX}*\n"
             f"🏠 Адрес: {house_address}, кв. {flat_number}\n"
-            f"📄 Кадастр: `{cadastre}`\n\n"
+            f"📄 Кадастровый номер: {cadastre}\n\n"
             f"Всё верно?"
         )
         
@@ -1330,22 +1344,24 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         for uid, app in apps.items():
             blocked = is_blocked(int(uid))
             
-            # Получаем информацию о доме если есть
-            house_info = ""
+            # Получаем информацию о доме
+            house_address = "-"
             house_id = app.get("house_id")
             if house_id and house_id in HOUSES:
-                house_info = f"\n🏠 {HOUSES[house_id]['address']}"
+                house_address = HOUSES[house_id]['address']
             
-            # Форматируем никнейм
+            # Форматируем имя и ник
+            user_name = app.get('name', '-')
             username = app.get('username')
             nick_display = f"@{username}" if username else "-"
             
             app_text = (
-                f"🏘️ *{COMPLEX}*\n\n"
-                f"👤 Имя: {app.get('name', '-')}\n"
+                f"📝 *Заявка:*\n"
+                f"🏘️ *{COMPLEX}*\n"
+                f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
+                f"👤 Имя: {user_name}\n"
                 f"👨‍💻 Ник: {nick_display}\n"
                 f"🆔 ID: {uid}\n"
-                f"🏠 Квартира: {app.get('flat', '-')}{house_info}\n"
             )
             
             if app.get("cadastre"):
@@ -1361,21 +1377,43 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if blocked:
                 app_text += "\n\n⛔ *Заблокирован*"
             
-            if app.get("file") and os.path.exists(app["file"]):
+            # Проверяем наличие файла
+            file_exists = False
+            if app.get("file"):
+                file_path = app["file"]
+                if os.path.exists(file_path):
+                    file_exists = True
+                else:
+                    app_text += "\n\n📎 Файл отсутствует"
+            
+            if file_exists:
                 try:
-                    with open(app["file"], "rb") as f:
-                        await context.bot.send_photo(
-                            user.id,
-                            photo=f,
-                            caption=app_text,
-                            parse_mode="Markdown",
-                            reply_markup=create_admin_buttons(uid, blocked)
-                        )
+                    file_path = app["file"]
+                    ext = pathlib.Path(file_path).suffix.lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.gif']:
+                        with open(file_path, "rb") as f:
+                            await context.bot.send_photo(
+                                user.id,
+                                photo=f,
+                                caption=app_text,
+                                parse_mode="Markdown",
+                                reply_markup=create_admin_buttons(uid, blocked)
+                            )
+                    else:
+                        with open(file_path, "rb") as f:
+                            await context.bot.send_document(
+                                user.id,
+                                document=f,
+                                caption=app_text,
+                                parse_mode="Markdown",
+                                reply_markup=create_admin_buttons(uid, blocked)
+                            )
                 except Exception as e:
-                    logger.error(f"Ошибка отправки фото: {e}")
+                    logger.error(f"Ошибка отправки файла: {e}")
+                    app_text += f"\n\n⚠️ Ошибка загрузки файла: {e}"
                     await context.bot.send_message(
                         user.id,
-                        app_text + f"\n\n⚠️ Фото не загружено: {e}",
+                        app_text,
                         parse_mode="Markdown",
                         reply_markup=create_admin_buttons(uid, blocked)
                     )
@@ -1563,18 +1601,29 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     }
     
     if save_json_with_backup(APPS_FILE, apps):
+        # Получаем адрес дома для уведомления
+        house_id = context.user_data.get("house_id")
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
+        
         # Уведомляем администраторов
         await notify_admins_about_new_app(
             context, user.id, user.full_name, user.username,
             context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
         )
         
-        context.user_data.clear()
+        # Показываем пользователю его заявку
         await update.message.reply_text(
-            "✅ *Файл получен! Заявка отправлена на рассмотрение.*",
+            f"✅ *Заявка отправлена на рассмотрение!*\n\n"
+            f"📝 *Ваша заявка:*\n"
+            f"🏘️ *{COMPLEX}*\n"
+            f"🏠 Адрес: {house_address}, кв. {context.user_data.get('flat', '-')}\n"
+            f"📄 Кадастровый номер: {context.user_data.get('cad', '-')}\n\n"
+            f"⏳ Статус: На рассмотрении",
             parse_mode="Markdown",
             reply_markup=create_user_menu_after_app_submission()
         )
+        
+        context.user_data.clear()
     else:
         await update.message.reply_text("❌ Ошибка при сохранении заявки.")
 
@@ -1595,23 +1644,35 @@ async def handle_user_callback(query, context, data, user):
         }
         
         if save_json_with_backup(APPS_FILE, apps):
+            # Получаем адрес дома для уведомления
+            house_id = context.user_data["house_id"]
+            house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
+            
             # Уведомляем администраторов
             await notify_admins_about_new_app(
                 context, user.id, user.full_name, user.username,
                 context.user_data['flat'], context.user_data['cad']
             )
             
-            context.user_data.clear()
+            # Показываем пользователю его заявку
             await query.edit_message_text(
-                "✅ *Заявка отправлена на рассмотрение!*",
+                f"✅ *Заявка отправлена на рассмотрение!*\n\n"
+                f"📝 *Ваша заявка:*\n"
+                f"🏘️ *{COMPLEX}*\n"
+                f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
+                f"📄 Кадастровый номер: {context.user_data['cad']}\n\n"
+                f"⏳ Статус: На рассмотрении",
                 parse_mode="Markdown"
             )
+            
             # Отправляем меню с кнопкой статуса
             await context.bot.send_message(
                 user.id,
                 "Теперь вы можете отслеживать статус заявки:",
                 reply_markup=create_user_menu_after_app_submission()
             )
+            
+            context.user_data.clear()
         else:
             await query.edit_message_text("❌ Ошибка при сохранении заявки.")
         return
@@ -1746,14 +1807,15 @@ async def handle_admin_callback(query, context, data, user):
                     if house_id and house_id in HOUSES:
                         house_address = HOUSES[house_id]['address']
                     
-                    # Форматируем никнейм
+                    # Форматируем имя и ник
+                    user_name = apps[target_id].get('name', '-') if target_id in apps else '-'
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
                     confirmation_text = (
                         f"⛔ *Пользователь заблокирован:*\n"
                         f"🏘️ {COMPLEX}\n"
                         f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
-                        f"👤 Имя: {apps[target_id].get('name', '-') if target_id in apps else '-'}\n"
+                        f"👤 Имя: {user_name}\n"
                         f"👨‍💻 Ник: {username_display}\n"
                         f"🆔 ID: {target_id}\n\n"
                         f"📝 Активная заявка автоматически отклонена."
@@ -1796,14 +1858,15 @@ async def handle_admin_callback(query, context, data, user):
                     if house_id and house_id in HOUSES:
                         house_address = HOUSES[house_id]['address']
                     
-                    # Форматируем никнейм
+                    # Форматируем имя и ник
+                    user_name = apps[target_id].get('name', '-') if target_id in apps else '-'
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
                     confirmation_text = (
                         f"✅ *Пользователь разблокирован:*\n"
                         f"🏘️ {COMPLEX}\n"
                         f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
-                        f"👤 Имя: {apps[target_id].get('name', '-') if target_id in apps else '-'}\n"
+                        f"👤 Имя: {user_name}\n"
                         f"👨‍💻 Ник: {username_display}\n"
                         f"🆔 ID: {target_id}"
                     )
@@ -2106,4 +2169,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
