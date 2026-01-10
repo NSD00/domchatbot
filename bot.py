@@ -1702,7 +1702,7 @@ async def handle_user_callback(query, context, data, user):
             # Отправляем меню с кнопкой статуса
             await context.bot.send_message(
                 user.id,
-                "Теперь вы можете отслеживать статус заявки:",
+                "Теперь вы можете отслеживать статус заявки.",
                 reply_markup=create_user_menu_after_app_submission()
             )
             
