@@ -119,6 +119,166 @@ STATUS_TEXT = {
 
 AUTO_HELP_KEYWORDS = ["зачем", "почему", "кадастр", "кадастров", "помощь", "справка"]
 
+# ================== GITHUB ХРАНИЛИЩЕ ==================
+import base64
+import aiohttp
+
+class GitHubStorage:
+    """Простое хранилище данных в GitHub"""
+    
+    def __init__(self):
+        self.token = os.getenv("GITHUB_TOKEN")
+        self.repo = os.getenv("GITHUB_REPO")
+        
+        if not self.token or not self.repo:
+            logger.warning("⚠️ GitHub токен или репозиторий не настроены")
+            self.enabled = False
+        else:
+            self.enabled = True
+            
+        self.base_url = f"https://api.github.com/repos/{self.repo}/contents"
+        self.headers = {
+            "Authorization": f"token {self.token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+    
+    async def upload_json(self, filename: str, data: Dict) -> bool:
+        """Загружает JSON данные в GitHub"""
+        if not self.enabled:
+            return False
+            
+        try:
+            content = json.dumps(data, ensure_ascii=False, indent=2)
+            encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+            
+            async with aiohttp.ClientSession() as session:
+                # Сначала проверяем существует ли файл
+                async with session.get(
+                    f"{self.base_url}/{filename}",
+                    headers=self.headers
+                ) as response:
+                    sha = None
+                    if response.status == 200:
+                        existing = await response.json()
+                        sha = existing.get("sha")
+                
+                # Обновляем или создаем файл
+                payload = {
+                    "message": f"Bot backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "content": encoded,
+                    "branch": "main"
+                }
+                
+                if sha:
+                    payload["sha"] = sha
+                
+                async with session.put(
+                    f"{self.base_url}/{filename}",
+                    headers=self.headers,
+                    json=payload
+                ) as response:
+                    if response.status in [200, 201]:
+                        logger.info(f"✅ JSON сохранен в GitHub: {filename}")
+                        return True
+                    else:
+                        error = await response.text()
+                        logger.error(f"❌ Ошибка сохранения JSON в GitHub: {error}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки в GitHub: {e}")
+            return False
+    
+    async def upload_file(self, filename: str, local_path: str) -> bool:
+        """Загружает файл (фото/PDF) в GitHub"""
+        if not self.enabled:
+            return False
+            
+        try:
+            with open(local_path, "rb") as f:
+                content = f.read()
+            
+            encoded = base64.b64encode(content).decode('utf-8')
+            
+            async with aiohttp.ClientSession() as session:
+                # Проверяем существует ли файл
+                async with session.get(
+                    f"{self.base_url}/{filename}",
+                    headers=self.headers
+                ) as response:
+                    sha = None
+                    if response.status == 200:
+                        existing = await response.json()
+                        sha = existing.get("sha")
+                
+                # Загружаем файл
+                payload = {
+                    "message": f"File backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                    "content": encoded,
+                    "branch": "main"
+                }
+                
+                if sha:
+                    payload["sha"] = sha
+                
+                async with session.put(
+                    f"{self.base_url}/{filename}",
+                    headers=self.headers,
+                    json=payload
+                ) as response:
+                    if response.status in [200, 201]:
+                        logger.info(f"✅ Файл сохранен в GitHub: {filename}")
+                        return True
+                    else:
+                        error = await response.text()
+                        logger.error(f"❌ Ошибка сохранения файла в GitHub: {error}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки файла в GitHub: {e}")
+            return False
+    
+    async def download_json(self, filename: str) -> Optional[Dict]:
+        """Скачивает JSON из GitHub"""
+        if not self.enabled:
+            return None
+            
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.base_url}/{filename}",
+                    headers=self.headers
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        content = base64.b64decode(data["content"]).decode('utf-8')
+                        return json.loads(content)
+                    else:
+                        logger.warning(f"Файл не найден в GitHub: {filename}")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки из GitHub: {e}")
+            return None
+    
+    async def file_exists(self, filename: str) -> bool:
+        """Проверяет существует ли файл в GitHub"""
+        if not self.enabled:
+            return False
+            
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.base_url}/{filename}",
+                    headers=self.headers
+                ) as response:
+                    return response.status == 200
+        except:
+            return False
+
+# Глобальный экземпляр GitHub хранилища
+github_storage = GitHubStorage()
+
 # ================== HTTP СЕРВЕР ДЛЯ UPTIMEROBOT ==================
 async def handle_health(request):
     """Обработчик health-check запросов для UptimeRobot"""
@@ -198,6 +358,57 @@ def save_json(path: str, data: Any) -> bool:
         logger.error(f"Ошибка сохранения {path}: {e}")
         return False
 
+def save_json_with_backup(path: str, data: Any) -> bool:
+    """Сохраняет JSON локально и в GitHub"""
+    
+    # 1. Сохраняем локально (как раньше)
+    if not save_json(path, data):
+        return False
+    
+    # 2. Асинхронно сохраняем в GitHub (в фоне)
+    filename = os.path.basename(path)
+    
+    # Определяем что это за файл для GitHub
+    if "applications" in filename:
+        gh_filename = "applications.json"
+    elif "blacklist" in filename:
+        gh_filename = "blacklist.json"
+    else:
+        gh_filename = filename
+    
+    # Запускаем асинхронную загрузку
+    asyncio.create_task(
+        github_storage.upload_json(gh_filename, data)
+    )
+    
+    return True
+
+async def save_file_with_backup(file_data: bytes, user_id: int, file_type: str, extension: str = ".jpg") -> str:
+    """Сохраняет файл локально и в GitHub"""
+    
+    # 1. Сохраняем локально
+    timestamp = int(datetime.now().timestamp())
+    
+    if file_type == "application":
+        filename = f"{user_id}_{timestamp}{extension}"
+        local_path = os.path.join(FILES_DIR, filename)
+        gh_filename = f"files/applications/{filename}"
+    else:  # contact
+        filename = f"contact_{user_id}_{timestamp}{extension}"
+        local_path = os.path.join(CONTACT_FILES_DIR, filename)
+        gh_filename = f"files/contacts/{filename}"
+    
+    # Сохраняем локально
+    with open(local_path, "wb") as f:
+        f.write(file_data)
+    
+    # 2. Асинхронно сохраняем в GitHub
+    asyncio.create_task(
+        github_storage.upload_file(gh_filename, local_path)
+    )
+    
+    return local_path
+
 def is_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь администратором"""
     return user_id in ADMINS
@@ -274,9 +485,34 @@ def cleanup_old_apps() -> int:
                 removed_count += 1
     
     if removed_count > 0:
-        save_json(APPS_FILE, apps)
+        save_json_with_backup(APPS_FILE, apps)
     
     return removed_count
+
+async def load_data_from_github():
+    """Загружает данные из GitHub при запуске бота"""
+    logger.info("🔄 Загрузка данных из GitHub...")
+    
+    # Загружаем JSON данные
+    apps_data = await github_storage.download_json("applications.json")
+    blacklist_data = await github_storage.download_json("blacklist.json")
+    
+    if apps_data:
+        save_json(APPS_FILE, apps_data)
+        logger.info(f"✅ Загружено {len(apps_data)} заявок из GitHub")
+    else:
+        logger.info("ℹ️ Заявки не найдены в GitHub, начинаем с чистого листа")
+    
+    if blacklist_data:
+        save_json(BLACKLIST_FILE, blacklist_data)
+        logger.info(f"✅ Загружен черный список ({len(blacklist_data)} пользователей) из GitHub")
+    
+    # Проверяем наличие файлового хранилища в GitHub
+    has_files = await github_storage.file_exists("files/")
+    if has_files:
+        logger.info("ℹ️ Файлы найдены в GitHub (будут загружаться по мере необходимости)")
+    
+    return apps_data is not None or blacklist_data is not None
 
 # ================== КЛАВИАТУРЫ ==================
 def create_user_menu(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
@@ -497,7 +733,7 @@ async def process_rejection(context, app_id, reason, query=None) -> bool:
         apps[app_id]["status"] = STATUS_TEXT["rejected"]
         apps[app_id]["reject_reason"] = reason
         
-        if save_json(APPS_FILE, apps):
+        if save_json_with_backup(APPS_FILE, apps):
             # Уведомляем пользователя
             try:
                 await context.bot.send_message(
@@ -695,7 +931,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
             user_app["status"] = STATUS_TEXT["rejected"]
             user_app["reject_reason"] = "⛔ Пользователь заблокирован"
-            save_json(APPS_FILE, apps)
+            save_json_with_backup(APPS_FILE, apps)
         
         return
     
@@ -713,7 +949,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Проверяем, существует ли такой дом
         if house_param in HOUSES:
-            # ДА! Пользователь пришел по специальной ссылке
+            # ДА! Пользователь пришел по специальной ссылки
             context.user_data["house_id"] = house_param
             house_selected_from_link = True
             
@@ -816,7 +1052,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
             user_app["status"] = STATUS_TEXT["rejected"]
             user_app["reject_reason"] = "⛔ Пользователь заблокирован"
-            save_json(APPS_FILE, apps)
+            save_json_with_backup(APPS_FILE, apps)
         
         return
     
@@ -1030,9 +1266,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         flat_number = context.user_data['flat']
         
         confirm_text = (
+            f"🏘️ *{COMPLEX}*\n\n"
             f"📋 *Проверьте введенные данные:*\n\n"
-            f"🏘️ *{COMPLEX}*\n"
-            f"🏠 Адрес: {house_address}, кв. {flat_number}\n"
+            f"📍 Адрес: {house_address}\n"
+            f"🏠 Квартира: {flat_number}\n"
             f"📄 Кадастр: `{cadastre}`\n\n"
             f"Всё верно?"
         )
@@ -1164,7 +1401,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
             user_app["status"] = STATUS_TEXT["rejected"]
             user_app["reject_reason"] = "⛔ Пользователь заблокирован"
-            save_json(APPS_FILE, apps)
+            save_json_with_backup(APPS_FILE, apps)
         
         return
     
@@ -1184,11 +1421,17 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             timestamp = int(datetime.now().timestamp())
             ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
             
-            safe_filename = f"contact_{user.id}_{timestamp}{ext}"
-            file_path = os.path.join(CONTACT_FILES_DIR, safe_filename)
-            
+            # Получаем данные файла
             tg_file = await file.get_file()
-            await tg_file.download_to_drive(file_path)
+            file_data = await tg_file.download_as_bytearray()
+            
+            # Сохраняем с бэкапом в GitHub
+            file_path = await save_file_with_backup(
+                bytes(file_data),
+                user.id,
+                "contact",
+                ext
+            )
             
             # Инициализируем contact_data если его нет
             if "contact_data" not in context.user_data:
@@ -1247,11 +1490,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         timestamp = int(datetime.now().timestamp())
         ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
         
-        safe_filename = f"{user.id}_{timestamp}{ext}"
-        file_path = os.path.join(FILES_DIR, safe_filename)
-        
+        # Получаем данные файла
         tg_file = await file.get_file()
-        await tg_file.download_to_drive(file_path)
+        file_data = await tg_file.download_as_bytearray()
+        
+        # Сохраняем с бэкапом в GitHub
+        file_path = await save_file_with_backup(
+            bytes(file_data),
+            user.id,
+            "application",
+            ext
+        )
+        
     except Exception as e:
         logger.error(f"Ошибка загрузки файла: {e}")
         await update.message.reply_text("❌ Ошибка при загрузке файла.")
@@ -1272,7 +1522,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     
-    if save_json(APPS_FILE, apps):
+    if save_json_with_backup(APPS_FILE, apps):
         # Уведомляем администраторов
         await notify_admins_about_new_app(
             context, user.id, user.full_name, user.username,
@@ -1304,7 +1554,7 @@ async def handle_user_callback(query, context, data, user):
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
-        if save_json(APPS_FILE, apps):
+        if save_json_with_backup(APPS_FILE, apps):
             # Уведомляем администраторов
             await notify_admins_about_new_app(
                 context, user.id, user.full_name, user.username,
@@ -1430,7 +1680,7 @@ async def handle_admin_callback(query, context, data, user):
         if action == "block":
             if target_id_int not in blacklist:
                 blacklist.append(target_id_int)
-                if save_json(BLACKLIST_FILE, blacklist):
+                if save_json_with_backup(BLACKLIST_FILE, blacklist):
                     # Уведомляем пользователя о блокировке
                     try:
                         await context.bot.send_message(
@@ -1447,7 +1697,7 @@ async def handle_admin_callback(query, context, data, user):
                     if target_id in apps and apps[target_id].get("status") == STATUS_TEXT["pending"]:
                         apps[target_id]["status"] = STATUS_TEXT["rejected"]
                         apps[target_id]["reject_reason"] = "⛔ Пользователь заблокирован"
-                        save_json(APPS_FILE, apps)
+                        save_json_with_backup(APPS_FILE, apps)
                     
                     confirmation_text = (
                         f"⛔ *Пользователь заблокирован*\n"
@@ -1477,7 +1727,7 @@ async def handle_admin_callback(query, context, data, user):
         if action == "unblock":
             if target_id_int in blacklist:
                 blacklist.remove(target_id_int)
-                if save_json(BLACKLIST_FILE, blacklist):
+                if save_json_with_backup(BLACKLIST_FILE, blacklist):
                     # Уведомляем пользователя о разблокировке
                     try:
                         await context.bot.send_message(
@@ -1518,7 +1768,7 @@ async def handle_admin_callback(query, context, data, user):
             if target_id in apps:
                 apps[target_id]["status"] = STATUS_TEXT["approved"]
                 
-                if save_json(APPS_FILE, apps):
+                if save_json_with_backup(APPS_FILE, apps):
                     # Отправляем ссылку на чат выбранного дома
                     success = await send_simple_invite(
                         context, 
@@ -1662,9 +1912,21 @@ async def main_async() -> None:
     ensure_dirs()
     
     logger.info(f"🤖 Запуск Telegram бота версии {BOT_VERSION}")
+    
+    # === ВОССТАНОВЛЕНИЕ ДАННЫХ ИЗ GITHUB ===
+    await load_data_from_github()
+    
+    # Очистка старых данных (как раньше)
+    cleanup_old_apps()
+    
     logger.info(f"🏘️ Название ЖК: {COMPLEX}")
     logger.info(f"🏠 Домов настроено: {len(HOUSES)}")
     logger.info(f"🌐 HTTP порт: {HTTP_PORT}")
+    
+    if github_storage.enabled:
+        logger.info("✅ GitHub backup включен")
+    else:
+        logger.warning("⚠️ GitHub backup отключен (проверьте GITHUB_TOKEN и GITHUB_REPO)")
     
     # Запускаем HTTP сервер для UptimeRobot
     try:
@@ -1784,5 +2046,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
