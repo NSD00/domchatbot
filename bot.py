@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.5.1"  # Увеличил версию на +0.0.1
+BOT_VERSION = "1.5.2"  # Увеличил версию на +0.0.2
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -120,12 +120,12 @@ STATUS_TEXT = {
 AUTO_HELP_KEYWORDS = ["зачем", "почему", "кадастр", "кадастров", "помощь", "справка"]
 
 ADVICE_TEXT = (
-    "💡 *Совет для будущих заявок:*\n\n"
+    "💡 Совет для будущих заявок:\n\n"
     "Администраторам проще проверить заявки, "
-    "когда указаны Имя и Телеграм ник.\n\n"
+    "когда указаны Имя и Telegram ник (@username).\n\n"
     "Такие заявки часто рассматриваются быстрее. "
     "Учтите на будущее! 👍\n\n"
-    "📌 *Как добавить:*\n"
+    "📌 Как добавить:\n"
     "1. В настройках Telegram укажите Имя\n"
     "2. Установите Username (@ваш_ник)"
 )
@@ -491,7 +491,7 @@ def cleanup_expired_applications() -> int:
             
             if now - created > timedelta(days=ACTIVE_APP_EXPIRE_DAYS):
                 data["status"] = STATUS_TEXT["rejected"]
-                data["reject_reason"] = "⏳ Время рассмотрения истекло."
+                data["reject_reason"] = "⏳ Время рассмотрение истекло."
                 
                 move_to_archive(app_id, data)
                 expired_count += 1
@@ -507,7 +507,7 @@ async def notify_expired_applications(context: ContextTypes.DEFAULT_TYPE) -> Non
     archive = load_json(ARCHIVE_FILE, {})
     
     for app_id, data in archive.items():
-        if data.get("reject_reason") == "⏳ Время рассмотрения истекло.":
+        if data.get("reject_reason") == "⏳ Время рассмотрение истекло.":
             try:
                 user_id = int(app_id)
                 
@@ -720,51 +720,67 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(buttons)
 
 # ================== ОБНОВЛЕННЫЕ ФУНКЦИИ СООБЩЕНИЙ ==================
-async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE, 
-                          text: str, keyboard=None) -> int:
-    """Отправляет или редактирует сообщение заявки"""
+async def send_application_message(user_id: int, context: ContextTypes.DEFAULT_TYPE,
+                                 text: str, keyboard=None) -> int:
+    """
+    Отправляет сообщение заявки.
+    Удаляет предыдущее сообщение заявки (если есть).
+    Всегда показывает новое сообщение пользователю.
+    """
     user_data = context.user_data
     
-    # Получаем ID предыдущего сообщения
-    last_msg_id = user_data.get("last_app_message_id")
-    
+    # 1. Отправляем НОВОЕ сообщение (гарантированно показываем пользователю)
     try:
-        if last_msg_id:
-            # Редактируем существующее сообщение
-            message = await context.bot.edit_message_text(
-                chat_id=user_id,
-                message_id=last_msg_id,
-                text=text,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-        else:
-            # Первое сообщение - отправляем новое
-            message = await context.bot.send_message(
-                user_id,
-                text,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-        
-        # Сохраняем ID для следующего редактирования
-        user_data["last_app_message_id"] = message.message_id
-        return message.message_id
-        
-    except telegram.error.BadRequest as e:
-        # Если не удалось отредактировать (например, сообщение удалено)
-        logger.error(f"Ошибка редактирования: {e}")
-        message = await context.bot.send_message(
+        new_message = await context.bot.send_message(
             user_id,
             text,
             parse_mode="Markdown",
             reply_markup=keyboard
         )
-        user_data["last_app_message_id"] = message.message_id
-        return message.message_id
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
         return None
+    
+    new_msg_id = new_message.message_id
+    
+    # 2. Пытаемся удалить СТАРОЕ сообщение заявки (если оно есть)
+    old_msg_id = user_data.get("app_form_message_id")
+    if old_msg_id and old_msg_id != new_msg_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=user_id,
+                message_id=old_msg_id
+            )
+            # Маленькая пауза для плавности
+            await asyncio.sleep(0.05)
+        except telegram.error.BadRequest as e:
+            # Сообщение уже удалено или не найдено - нормальная ситуация
+            pass
+        except Exception as e:
+            logger.debug(f"Не удалось удалить сообщение {old_msg_id}: {e}")
+    
+    # 3. Сохраняем ID нового сообщения как текущее
+    user_data["app_form_message_id"] = new_msg_id
+    
+    return new_msg_id
+
+async def cleanup_application_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Очищает сообщения текущей заявки при отмене или завершении"""
+    user_data = context.user_data
+    
+    # Удаляем текущее сообщение заявки (если есть)
+    current_msg_id = user_data.get("app_form_message_id")
+    if current_msg_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=user_id,
+                message_id=current_msg_id
+            )
+        except:
+            pass  # Игнорируем ошибки удаления
+    
+    # Очищаем ID из user_data
+    user_data.pop("app_form_message_id", None)
 
 async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
     contact_data = context.user_data.get("contact_data", {})
@@ -922,7 +938,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 context.user_data["step"] = "flat"
                 
-                await send_app_message(
+                await send_application_message(
                     user.id, context,
                     f"📝 *Заявка {COMPLEX}:*\n"
                     f"🏠 Адрес: {house['address']}\n\n"
@@ -976,7 +992,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             context.user_data["step"] = "select_house"
             
-            await send_app_message(
+            await send_application_message(
                 user.id, context,
                 houses_text,
                 create_user_menu()
@@ -989,7 +1005,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
-            await send_app_message(
+            await send_application_message(
                 user.id, context,
                 f"📝 *Заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house['address']}\n\n"
@@ -1127,6 +1143,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
         )
         
+        # Удаляем сообщения формы заявки
+        await cleanup_application_messages(user.id, context)
+        
         confirmation_text = (
             f"✅ *Заявка отправлена на рассмотрение!*\n\n"
             f"📋 *Ваша заявка {COMPLEX}:*\n"
@@ -1143,18 +1162,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=create_user_menu_after_app_submission()
         )
         
+        # Совет обычным текстом (без Markdown форматирования)
         if should_show_advice(user):
-            advice_message = (
-                "💡 *Совет для будущих заявки:*\n\n"
-                "Администраторам проще проверить заявки, "
-                "когда указаны Имя и Телеграм ник.\n\n"
-                "Такие заявки часто рассматриваются быстрее. "
-                "Учтите на будущее! 👍\n\n"
-                "📌 *Как добавить:*\n"
-                "1. В настройках Telegram укажите Имя\n"
-                "2. Установите Username (@ваш_ник)"
+            await context.bot.send_message(
+                user.id,
+                ADVICE_TEXT  # ← Обычный текст, без parse_mode="Markdown"
             )
-            await context.bot.send_message(user.id, advice_message, parse_mode="Markdown")
         
         # Очищаем данные после успешной отправки
         context.user_data.clear()
@@ -1186,17 +1199,10 @@ async def handle_user_callback(query, context, data, user):
                 context.user_data['flat'], context.user_data['cad']
             )
             
-            try:
-                # Пытаемся отредактировать старое сообщение
-                await query.edit_message_text(
-                    f"✅ *Заявка отправлена на рассмотрение!*",
-                    parse_mode="Markdown"
-                )
-            except telegram.error.BadRequest:
-                # Если не получилось отредактировать — ничего страшного
-                pass
+            # Удаляем сообщения формы заявки
+            await cleanup_application_messages(user.id, context)
             
-            # Отправляем полное подтверждение новым сообщением
+            # Отправляем подтверждение новым сообщением
             confirmation_text = (
                 f"📋 *Ваша заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
@@ -1213,8 +1219,12 @@ async def handle_user_callback(query, context, data, user):
                 reply_markup=create_user_menu_after_app_submission()
             )
             
+            # Совет обычным текстом (без Markdown форматирования)
             if should_show_advice(user):
-                await context.bot.send_message(user.id, ADVICE_TEXT, parse_mode="Markdown")
+                await context.bot.send_message(
+                    user.id,
+                    ADVICE_TEXT  # ← Обычный текст, без parse_mode="Markdown"
+                )
             
             context.user_data.clear()
         else:
@@ -1229,23 +1239,14 @@ async def handle_user_callback(query, context, data, user):
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         flat_number = context.user_data['flat']
         
-        try:
-            await query.edit_message_text(
-                f"📝 *Заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
-                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
-                parse_mode="Markdown",
-                reply_markup=None
-            )
-        except telegram.error.BadRequest:
-            # Если не получилось отредактировать, отправляем новое сообщение
-            await send_app_message(
-                user.id, context,
-                f"📝 *Заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
-                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
-                create_user_menu_during_entry()
-            )
+        # Используем новую функцию для обновления сообщения
+        await send_application_message(
+            user.id, context,
+            f"📝 *Заявка {COMPLEX}:*\n"
+            f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
+            "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+            create_user_menu_during_entry()
+        )
         return
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
@@ -1492,7 +1493,10 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if text == "❌ Отмена":
+        # Удаляем сообщения формы заявки
+        await cleanup_application_messages(user.id, context)
         context.user_data.clear()
+        
         await update.message.reply_text(
             "❌ *Ввод данных отменен.*",
             parse_mode="Markdown",
@@ -1501,6 +1505,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if text == "📝 Подать заявку" or text == "📝 Подать новую заявку":
+        # Очищаем предыдущие данные и сообщения
+        await cleanup_application_messages(user.id, context)
         context.user_data.clear()
         
         if not HOUSES:
@@ -1534,7 +1540,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
-            await send_app_message(
+            await send_application_message(
                 user.id, context,
                 f"📝 *Заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house['address']}\n\n"
@@ -1555,7 +1561,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         houses_text += f"\nНапишите номер (1-{len(HOUSES)}):"
         
-        await send_app_message(
+        await send_application_message(
             user.id, context,
             houses_text,
             create_user_menu()
@@ -1571,7 +1577,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 context.user_data["step"] = "flat"
                 
                 house = HOUSES[house_id]
-                await send_app_message(
+                await send_application_message(
                     user.id, context,
                     f"📝 *Заявка {COMPLEX}:*\n"
                     f"🏠 Адрес: {house['address']}\n\n"
@@ -1614,7 +1620,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         house_id = context.user_data.get("house_id")
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         
-        await send_app_message(
+        await send_application_message(
             user.id, context,
             f"📝 *Заявка {COMPLEX}:*\n"
             f"🏠 Адрес: {house_address}, кв. {text.strip()}\n\n"
@@ -1654,7 +1660,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"Всё верно?"
         )
         
-        await send_app_message(
+        await send_application_message(
             user.id, context,
             confirm_text,
             create_cad_confirm_keyboard()
@@ -1819,6 +1825,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await handle_blacklist_callback(query, context, data, user)
     else:
         await handle_admin_callback(query, context, data, user)
+
+async def process_rejection(context, app_id, reason, query=None) -> bool:
+    apps = load_json(APPS_FILE, {})
+    
+    if app_id in apps:
+        apps[app_id]["status"] = STATUS_TEXT["rejected"]
+        apps[app_id]["reject_reason"] = reason
+        
+        move_to_archive(app_id, apps[app_id])
+        
+        try:
+            await context.bot.send_message(
+                int(app_id),
+                f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n*Причина:* {reason}",
+                parse_mode="Markdown",
+                reply_markup=create_user_menu_with_new_app()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления об отклонении пользователю {app_id}: {e}")
+        
+        if query:
+            try:
+                await query.edit_message_text(f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}", parse_mode="Markdown")
+            except:
+                await context.bot.send_message(
+                    query.from_user.id,
+                    f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}",
+                    parse_mode="Markdown"
+                )
+        
+        context.chat_data.pop("pending_reject_app", None)
+        return True
+    
+    return False
 
 async def handle_admin_callback(query, context, data, user):
     if not is_admin(user.id):
@@ -2097,40 +2137,6 @@ async def handle_admin_callback(query, context, data, user):
             return
     
     await query.edit_message_text("❌ Неизвестная команда.")
-
-async def process_rejection(context, app_id, reason, query=None) -> bool:
-    apps = load_json(APPS_FILE, {})
-    
-    if app_id in apps:
-        apps[app_id]["status"] = STATUS_TEXT["rejected"]
-        apps[app_id]["reject_reason"] = reason
-        
-        move_to_archive(app_id, apps[app_id])
-        
-        try:
-            await context.bot.send_message(
-                int(app_id),
-                f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n*Причина:* {reason}",
-                parse_mode="Markdown",
-                reply_markup=create_user_menu_with_new_app()
-            )
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления об отклонении пользователю {app_id}: {e}")
-        
-        if query:
-            try:
-                await query.edit_message_text(f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}", parse_mode="Markdown")
-            except:
-                await context.bot.send_message(
-                    query.from_user.id,
-                    f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}",
-                    parse_mode="Markdown"
-                )
-        
-        context.chat_data.pop("pending_reject_app", None)
-        return True
-    
-    return False
 
 async def handle_archive_callback(query, context, data, user):
     if not is_admin(user.id):
@@ -2839,6 +2845,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
