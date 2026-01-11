@@ -456,7 +456,7 @@ def cleanup_archive() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                        pass
+                            pass
                 
                 del archive[app_id]
                 removed_count += 1
@@ -2841,3 +2841,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
