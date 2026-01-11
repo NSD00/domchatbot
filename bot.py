@@ -1169,7 +1169,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 update_info = (
                     f"👑 *Административная панель*\n"
                     f"🔄 Версия: `{BOT_VERSION}`\n"
-                    f"🏘️ Домов: {len(HOUSES)}"
+                    f"🏘️ Домов настроено: {len(HOUSES)}"
                 )
                 
                 await update.message.reply_text(
@@ -1220,7 +1220,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         update_info = (
             f"👑 *Административная панель*\n"
             f"🔄 Версия: `{BOT_VERSION}`\n"
-            f"🏘️ Домов: {len(HOUSES)}"
+            f"🏘️ Домов настроено: {len(HOUSES)}"
         )
         
         await update.message.reply_text(
@@ -1713,7 +1713,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             f"✅ Одобрено в архиве: *{approved_archive}*\n"
             f"❌ Отклонено в архиве: *{rejected_archive}*\n\n"
             f"⛔ Заблокировано: *{blacklist}*\n"
-            f"🏠 Домов: *{len(HOUSES)}*"
+            f"🏠 Домов настроено: *{len(HOUSES)}*"
         )
         
         await update.message.reply_text(stats_text, parse_mode="Markdown")
@@ -2994,4 +2994,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
