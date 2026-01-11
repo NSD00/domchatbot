@@ -25,7 +25,8 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters
+    filters,
+    JobQueue
 )
 import telegram.error
 
@@ -37,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.4.3"  # Обновляем версию
+BOT_VERSION = "1.5.0"  # Мажорное обновление: +0.1.0 (рефакторинг, новые фичи)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -78,6 +79,7 @@ ARCHIVE_FILE = os.path.join(DATA_DIR, "archive.json")
 
 # Настройки
 ARCHIVE_KEEP_DAYS = 30  # Архив храним 30 дней
+ACTIVE_APP_EXPIRE_DAYS = 7  # Активные заявки храним 7 дней
 HTTP_PORT = int(os.getenv("PORT", "8080"))
 
 # Шаблоны причин отклонения
@@ -358,7 +360,7 @@ def save_json_with_backup(path: str, data: Any) -> bool:
     return True
 
 def save_file_locally(file_data: bytes, user_id: int, file_type: str, extension: str = ".jpg") -> str:
-    """Сохраняет файл локально (упрощенная версия)"""
+    """Сохраняет файл локально"""
     timestamp = int(datetime.now().timestamp())
     
     if file_type == "application":
@@ -466,7 +468,7 @@ def move_to_archive(app_id: str, app_data: Dict) -> None:
     save_json_with_backup(ARCHIVE_FILE, archive)
 
 def cleanup_archive() -> int:
-    """Очищает старый архив (старше 30 дней)"""
+    """Очищает старый архив (старше ARCHIVE_KEEP_DAYS дней)"""
     archive = load_json(ARCHIVE_FILE, {})
     now = datetime.now(timezone.utc)
     removed_count = 0
@@ -497,7 +499,7 @@ def cleanup_archive() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass
+                        pass
                 
                 del archive[app_id]
                 removed_count += 1
@@ -513,12 +515,91 @@ def cleanup_archive() -> int:
     
     return removed_count
 
-def cleanup_old_apps() -> int:
-    """Очищает старые данные"""
-    # Очищаем архив (старше ARCHIVE_KEEP_DAYS дней)
-    archive_removed = cleanup_archive()
+def cleanup_expired_applications() -> int:
+    """Очищает просроченные активные заявки (старше 7 дней)"""
+    apps = load_json(APPS_FILE, {})
+    now = datetime.now(timezone.utc)
+    expired_count = 0
     
-    # Активные заявки НЕ очищаем автоматически - они хранятся пока их не обработают
+    for app_id, data in list(apps.items()):
+        try:
+            # Проверяем только заявки на рассмотрении
+            if data.get("status") != STATUS_TEXT["pending"]:
+                continue
+                
+            created_str = data.get("created_at")
+            if not created_str:
+                continue
+                
+            created = datetime.fromisoformat(created_str)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            
+            # Если заявка старше 7 дней
+            if now - created > timedelta(days=ACTIVE_APP_EXPIRE_DAYS):
+                # Меняем статус
+                data["status"] = STATUS_TEXT["rejected"]
+                data["reject_reason"] = "⏳ Время рассмотрения истекло (7 дней)"
+                
+                # Переносим в архив
+                move_to_archive(app_id, data)
+                expired_count += 1
+                
+                logger.info(f"✅ Заявка {app_id} просрочена и перенесена в архив")
+                
+        except (KeyError, ValueError, AttributeError) as e:
+            logger.error(f"Ошибка при очистке просроченной заявки {app_id}: {e}")
+    
+    return expired_count
+
+async def notify_expired_applications(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Уведомляет пользователей об истечении времени заявки"""
+    archive = load_json(ARCHIVE_FILE, {})
+    
+    for app_id, data in archive.items():
+        # Ищем только что отклоненные по времени заявки
+        if data.get("reject_reason") == "⏳ Время рассмотрения истекло (7 дней)":
+            try:
+                user_id = int(app_id)
+                
+                # Получаем адрес дома
+                house_address = "-"
+                house_id = data.get("house_id")
+                if house_id and house_id in HOUSES:
+                    house_address = HOUSES[house_id]["address"]
+                
+                # Форматируем имя
+                user_name = data.get('name', '')
+                name_display = f", {user_name}" if user_name else ""
+                
+                # Отправляем уведомление
+                await context.bot.send_message(
+                    user_id,
+                    f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n"
+                    f"*Причина:* Время рассмотрения заявки истекло\n"
+                    f"📝 Вы можете подать новую заявку, если это ещё актуально.",
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu_with_new_app()
+                )
+                
+                logger.info(f"✅ Уведомление отправлено пользователю {app_id}{name_display}")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки уведомления пользователю {app_id}: {e}")
+
+def cleanup_data() -> int:
+    """Очищает все данные: архив (30 дней) и активные заявки (7 дней)"""
+    total_removed = 0
+    
+    # 1. Очищаем архив (старше 30 дней)
+    archive_removed = cleanup_archive()
+    total_removed += archive_removed
+    
+    # 2. Очищаем просроченные активные заявки (старше 7 дней)
+    expired_removed = cleanup_expired_applications()
+    total_removed += expired_removed
+    
+    # 3. Очищаем файлы от очень старых активных заявок (старше 90 дней)
     apps = load_json(APPS_FILE, {})
     now = datetime.now(timezone.utc)
     files_cleaned = 0
@@ -557,7 +638,27 @@ def cleanup_old_apps() -> int:
         except (KeyError, ValueError, AttributeError) as e:
             logger.error(f"Ошибка при очистке файлов заявки {uid}: {e}")
     
-    return archive_removed + files_cleaned
+    total_removed += files_cleaned
+    
+    if total_removed > 0:
+        logger.info(f"🧹 Очищено: {archive_removed} архивных, {expired_removed} просроченных, {files_cleaned} файлов")
+    
+    return total_removed
+
+async def scheduled_cleanup(context: ContextTypes.DEFAULT_TYPE):
+    """Ежедневная фоновая очистка данных"""
+    logger.info("🔄 Запуск ежедневной очистки данных...")
+    
+    # Очищаем данные
+    cleaned_count = cleanup_data()
+    
+    # Уведомляем пользователей об истекших заявках
+    await notify_expired_applications(context)
+    
+    if cleaned_count > 0:
+        logger.info(f"✅ Ежедневная очистка завершена. Обработано: {cleaned_count}")
+    else:
+        logger.info("✅ Ежедневная очистка завершена. Данных для очистки не найдено.")
 
 async def load_data_from_github():
     """Загружает данные из GitHub при запуске бота"""
@@ -698,7 +799,460 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
     buttons.append([InlineKeyboardButton("↩️ Отмена", callback_data=f"cancel_reply:{target_user_id}")])
     return InlineKeyboardMarkup(buttons)
 
-# ================== УПРАВЛЕНИЕ СООБЩЕНИЯМИ ==================
+# ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /start с поддержкой deep linking"""
+    user = update.effective_user
+    
+    if not context.user_data.get("step"):
+        context.user_data.clear()
+    
+    # Проверка блокировки
+    if not is_admin(user.id) and is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 Вы заблокированы и не можете пользоваться ботом. "
+            "Если Вы считаете, что заблокированы по ошибке, "
+            "попросите соседа написать администратору домового чата."
+        )
+        
+        # Автоматически отклоняем все активные заявки
+        apps = load_json(APPS_FILE, {})
+        user_app = apps.get(str(user.id))
+        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
+            user_app["status"] = STATUS_TEXT["rejected"]
+            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
+            move_to_archive(str(user.id), user_app)
+        
+        return
+    
+    # Проверяем и чистим данные при каждом /start
+    cleanup_data()
+    
+    # ============ DEEP LINKING: Обработка ?start=house1 ============
+    args = context.args
+    
+    if args and len(args) > 0:
+        house_param = args[0]  # Будет "house1", "house2" и т.д.
+        
+        # Проверяем, существует ли такой дом
+        if house_param in HOUSES:
+            # ДА! Пользователь пришел по специальной ссылки
+            context.user_data["house_id"] = house_param
+            
+            if is_admin(user.id):
+                # Админ даже со специальной ссылки видит админ-панель
+                update_info = (
+                    f"👑 *Административная панель*\n"
+                    f"🔄 Версия: `{BOT_VERSION}`\n"
+                    f"🏘️ Домов настроено: {len(HOUSES)}"
+                )
+                
+                await update.message.reply_text(
+                    update_info,
+                    parse_mode="Markdown",
+                    reply_markup=ADMIN_MENU
+                )
+            else:
+                # Обычный пользователь - приветствие
+                house = HOUSES[house_param]
+                
+                welcome_text = (
+                    f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
+                    f"🏠 Ваш дом: {house['address']}\n\n"
+                    f"📝 *Для подачи заявки в домовой чат:*\n"
+                    f"1. Укажите номер квартиры\n"
+                    f"2. Предоставьте кадастровый номер\n\n"
+                    f"⏱️ *Рассмотрение:* 1-3 дня\n"
+                    f"✅ *После одобрения:* получите ссылку на чат"
+                )
+                
+                await update.message.reply_text(
+                    welcome_text,
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu()
+                )
+                
+                # Небольшая пауза
+                await asyncio.sleep(1)
+                
+                context.user_data["step"] = "flat"
+                
+                await send_app_message(
+                    user.id, context,
+                    f"📝 *Заявка {COMPLEX}:*\n"
+                    f"🏠 Адрес: {house['address']}\n\n"
+                    f"Введите номер вашей квартиры:",
+                    create_user_menu_during_entry()
+                )
+            
+            # Выходим из функции - дом уже выбран
+            return
+    
+    # СТАНДАРТНОЕ ПРИВЕТСТВИЕ
+    if is_admin(user.id):
+        update_info = (
+            f"👑 *Административная панель*\n"
+            f"🔄 Версия: `{BOT_VERSION}`\n"
+            f"🏘️ Домов настроено: {len(HOUSES)}"
+        )
+        
+        await update.message.reply_text(
+            update_info,
+            parse_mode="Markdown",
+            reply_markup=ADMIN_MENU
+        )
+    else:
+        # Приветствие для обычного входа
+        welcome_text = (
+            f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
+            f"📝 *Для подачи заявки в домовой чат:*\n"
+            f"1. Выберите ваш дом\n"
+            f"2. Укажите номер квартиры\n"
+            f"3. Предоставьте кадастровый номер\n\n"
+            f"⏱️ *Рассмотрение:* 1-3 дня\n"
+            f"✅ *После одобрения:* получите ссылку на чат"
+        )
+        
+        await update.message.reply_text(
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=create_user_menu()
+        )
+        
+        # Если несколько домов И пользователь без специальной ссылки
+        if len(HOUSES) > 1:
+            # Небольшая пауза
+            await asyncio.sleep(1)
+            
+            # Первое окно: выбор дома
+            houses_text = (
+                f"📝 *Заявка {COMPLEX}:*\n\n"
+                f"🏠 *Выберите ваш адрес:*\n\n"
+            )
+            
+            for idx, (house_id, house) in enumerate(HOUSES.items(), 1):
+                houses_text += f"{idx}. {house['address']}\n"
+            
+            houses_text += f"\nНапишите номер (1-{len(HOUSES)}):"
+            
+            context.user_data["step"] = "select_house"
+            
+            await send_app_message(
+                user.id, context,
+                houses_text,
+                create_user_menu()
+            )
+        else:
+            # Если только один дом - небольшая пауза
+            await asyncio.sleep(1)
+            
+            house_id = list(HOUSES.keys())[0]
+            context.user_data["house_id"] = house_id
+            context.user_data["step"] = "flat"
+            
+            house = HOUSES[house_id]
+            # Второе окно: ввод квартиры
+            await send_app_message(
+                user.id, context,
+                f"📝 *Заявка {COMPLEX}:*\n"
+                f"🏠 Адрес: {house['address']}\n\n"
+                f"Введите номер вашей квартиры:",
+                create_user_menu_during_entry()
+            )
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик файлов"""
+    user = update.effective_user
+    
+    # Проверка блокировки
+    if not is_admin(user.id) and is_blocked(user.id):
+        await update.message.reply_text(
+            "🚫 Вы заблокированы и не можете пользоваться ботом. "
+            "Если Вы считаете, что заблокированы по ошибке, "
+            "попросите соседа написать администратору домового чата."
+        )
+        
+        # Автоматически отклоняем активную заявку
+        apps = load_json(APPS_FILE, {})
+        user_app = apps.get(str(user.id))
+        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
+            user_app["status"] = STATUS_TEXT["rejected"]
+            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
+            move_to_archive(str(user.id), user_app)
+        
+        return
+    
+    step = context.user_data.get("step")
+    
+    # Обработка файлов для сообщения админу
+    if step == "contact":
+        if update.message.document:
+            file = update.message.document
+        elif update.message.photo:
+            file = update.message.photo[-1]
+        else:
+            return
+        
+        try:
+            # Скачиваем файл
+            timestamp = int(datetime.now().timestamp())
+            ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
+            
+            # Получаем данные файла
+            tg_file = await file.get_file()
+            file_data = await tg_file.download_as_bytearray()
+            
+            # Сохраняем локально
+            file_path = save_file_locally(
+                bytes(file_data),
+                user.id,
+                "contact",
+                ext
+            )
+            
+            # Инициализируем contact_data если его нет
+            if "contact_data" not in context.user_data:
+                context.user_data["contact_data"] = {"text": "", "files": []}
+            
+            # Добавляем файл в список
+            context.user_data["contact_data"]["files"].append(file_path)
+            
+            # Проверяем, есть ли текст в сообщении (caption)
+            text = update.message.caption or ""
+            if text:
+                # Проверяем на команду отмены (сообщение в один символ)
+                if len(text.strip()) == 1:
+                    context.user_data.clear()
+                    # Удаляем временный файл
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+                    await update.message.reply_text(
+                        "❌ *Отправка сообщения отменена.*",
+                        parse_mode="Markdown",
+                        reply_markup=create_user_menu(user.id)
+                    )
+                    return
+                    
+                context.user_data["contact_data"]["text"] = text
+                # Если есть caption, сразу отправляем сообщение
+                await send_contact_message(update, context, user)
+            else:
+                # Если нет caption, просим добавить текст
+                await update.message.reply_text(
+                    "✅ Файл получен. Теперь напишите текст сообщения:",
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu_during_entry()
+                )
+                
+        except Exception as e:
+            logger.error(f"Ошибка загрузки контактного файла: {e}")
+            await update.message.reply_text("❌ Ошибка при загрузке файла.")
+        return
+    
+    # Обработка файлов для заявки (кадастровый номер)
+    if step != "cad":
+        await update.message.reply_text("⚠️ Сначала введите номер квартиры.")
+        return
+    
+    if update.message.document:
+        file = update.message.document
+    elif update.message.photo:
+        file = update.message.photo[-1]
+    else:
+        return
+    
+    try:
+        # Скачиваем файл
+        timestamp = int(datetime.now().timestamp())
+        ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
+        
+        # Получаем данные файла
+        tg_file = await file.get_file()
+        file_data = await tg_file.download_as_bytearray()
+        
+        # Сохраняем локально
+        file_path = save_file_locally(
+            bytes(file_data),
+            user.id,
+            "application",
+            ext
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка загрузки файла: {e}")
+        await update.message.reply_text("❌ Ошибка при загрузке файла.")
+        return
+    
+    # Сохраняем заявку
+    apps = load_json(APPS_FILE, {})
+    
+    apps[str(user.id)] = {
+        "user_id": user.id,
+        "name": user.full_name,
+        "username": user.username,
+        "house_id": context.user_data.get("house_id", ""),
+        "flat": context.user_data.get("flat", ""),
+        "cadastre": context.user_data.get("cad", ""),
+        "file": file_path,
+        "status": STATUS_TEXT["pending"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    if save_json_with_backup(APPS_FILE, apps):
+        # Получаем адрес дома для уведомления
+        house_id = context.user_data.get("house_id")
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
+        
+        # Уведомляем администраторов
+        await notify_admins_about_new_app(
+            context, user.id, user.full_name, user.username,
+            context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
+        )
+        
+        # ПОЛНОЕ ПОДТВЕРЖДЕНИЕ ПОЛЬЗОВАТЕЛЮ С ДАННЫМИ
+        confirmation_text = (
+            f"✅ *Заявка отправлена на рассмотрение!*\n\n"
+            f"📋 *Ваша заявка {COMPLEX}:*\n"
+            f"🏠 Адрес: {house_address}, кв. {context.user_data.get('flat', '-')}\n"
+            f"📄 Кадастровый номер: {context.user_data.get('cad', '-')}\n\n"
+            f"⏳ *Статус:* На рассмотрении\n"
+            f"📅 *Срок:* До 7 дней\n\n"
+            f"📝 Используйте кнопку «Статус заявки» для отслеживания."
+        )
+        
+        await update.message.reply_text(
+            confirmation_text,
+            parse_mode="Markdown",
+            reply_markup=create_user_menu_after_app_submission()
+        )
+        
+        # Совет про имя и ник (если нужно)
+        if should_show_advice(user):
+            advice_message = (
+                "━━━━━━━━━━━━━━━━\n\n"
+                "💡 *Совет для будущих заявок:*\n\n"
+                "Администраторам проще проверить заявки, "
+                "когда указаны *Имя* и *Телеграм ник*.\n\n"
+                "Такие заявки часто рассматриваются быстрее. "
+                "Учтите на будущее! 👍\n\n"
+                "📌 *Как добавить:*\n"
+                "1. В настройках Telegram укажите Имя\n"
+                "2. Установите Username (@ваш_ник)"
+            )
+            await context.bot.send_message(user.id, advice_message, parse_mode="Markdown")
+        
+        # Очищаем сообщения заявки
+        try:
+            await delete_previous_app_messages(user.id, context)
+        except:
+            pass
+        
+        context.user_data.clear()
+    else:
+        await update.message.reply_text("❌ Ошибка при сохранении заявки.")
+
+async def handle_user_callback(query, context, data, user):
+    """Обработка callback'ов от пользователей"""
+    if data == "cad_ok":
+        apps = load_json(APPS_FILE, {})
+        
+        apps[str(user.id)] = {
+            "user_id": user.id,
+            "name": user.full_name,
+            "username": user.username,
+            "house_id": context.user_data["house_id"],
+            "flat": context.user_data["flat"],
+            "cadastre": context.user_data["cad"],
+            "status": STATUS_TEXT["pending"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        if save_json_with_backup(APPS_FILE, apps):
+            # Получаем адрес дома для уведомления
+            house_id = context.user_data["house_id"]
+            house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
+            
+            # Уведомляем администраторов
+            await notify_admins_about_new_app(
+                context, user.id, user.full_name, user.username,
+                context.user_data['flat'], context.user_data['cad']
+            )
+            
+            # Удаляем сообщения заявки
+            try:
+                await delete_previous_app_messages(user.id, context)
+            except Exception as e:
+                logger.error(f"Ошибка удаления сообщений: {e}")
+            
+            # ПОЛНОЕ ПОДТВЕРЖДЕНИЕ С ДАННЫМИ
+            await query.edit_message_text(
+                f"✅ *Заявка отправлена на рассмотрение!*\n\n"
+                f"📋 *Ваша заявка {COMPLEX}:*\n"
+                f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
+                f"📄 Кадастровый номер: {context.user_data['cad']}\n\n"
+                f"⏳ *Статус:* На рассмотрении\n"
+                f"📅 *Срок:* До 7 дней",
+                parse_mode="Markdown"
+            )
+            
+            # Отправляем меню
+            await context.bot.send_message(
+                user.id,
+                "📝 Используйте кнопку «Статус заявки» для отслеживания.",
+                reply_markup=create_user_menu_after_app_submission()
+            )
+            
+            # Совет про имя и ник (если нужно)
+            if should_show_advice(user):
+                advice_message = (
+                    "━━━━━━━━━━━━━━━━\n\n"
+                    "💡 *Совет для будущих заявок:*\n\n"
+                    "Администраторам проще проверить заявки, "
+                    "когда указаны *Имя* и *Телеграм ник*.\n\n"
+                    "Такие заявки часто рассматриваются быстрее. "
+                    "Учтите на будущее! 👍\n\n"
+                    "📌 *Как добавить:*\n"
+                    "1. В настройках Telegram укажите Имя\n"
+                    "2. Установите Username (@ваш_ник)"
+                )
+                await context.bot.send_message(user.id, advice_message, parse_mode="Markdown")
+            
+            context.user_data.clear()
+        else:
+            await query.edit_message_text("❌ Ошибка при сохранении заявки.")
+        return
+    
+    elif data == "cad_no":
+        context.user_data.pop("cad", None)
+        context.user_data["step"] = "cad"
+        
+        house_id = context.user_data.get("house_id")
+        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
+        flat_number = context.user_data['flat']
+        
+        # Используем query для редактирования текущего сообщения
+        try:
+            await query.edit_message_text(
+                f"📝 *Заявка {COMPLEX}:*\n"
+                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
+                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+                parse_mode="Markdown",
+                reply_markup=None
+            )
+        except:
+            # Если не удалось отредактировать, отправляем новое
+            await send_app_message(
+                user.id, context,
+                f"📝 *Заявка {COMPLEX}:*\n"
+                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
+                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+                create_user_menu_during_entry()
+            )
+        return
+
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 async def delete_previous_app_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Удаляет предыдущие сообщения заявки по user_id"""
     user_data = context.user_data
@@ -747,41 +1301,6 @@ async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE,
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
         return None
-
-# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
-async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает контекстную помощь в зависимости от текущего этапа пользователя"""
-    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
-    
-    step = context.user_data.get("step")
-    if step == "flat":
-        await update.message.reply_text(
-            "Пожалуйста, введите номер вашей квартиры:\n\n"
-            "📌 *Как вводить:*\n"
-            "• Просто цифры: 12\n"
-            "• Цифры с буквой: 12А, 25Б",
-            parse_mode="Markdown"
-        )
-    elif step == "cad":
-        await update.message.reply_text(
-            "Введите кадастровый номер:\n\n"
-            "📌 *Как вводить:*\n"
-            "• Формат: XX:XX:XXXXXXX:XXX\n\n"
-            "📌 *Можно:*\n"
-            "• Использовать пробелы вместо двоеточий\n"
-            "• Написать слитно (только цифры)\n"
-            "• Отправить файл документа с номером (фото/PDF)",
-            parse_mode="Markdown"
-        )
-    elif step == "contact":
-        await update.message.reply_text(
-            "Напишите сообщение или прикрепите файл:\n\n"
-            "📌 *Как отправить:*\n"
-            "Избегайте слов: зачем, почему, помощь, справка, кадастр.\n"
-            "Иначе бот будет выводить справочную информацию.\n"
-            "ℹ️ Чтобы отменить отправку, напишите любое сообщение в один символ.",
-            parse_mode="Markdown"
-        )
 
 async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
     """Отправка сообщения администратору"""
@@ -979,7 +1498,6 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
             except:
                 pass
 
-# ================== ОТПРАВКА ССЫЛКИ ==================
 async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
     """Отправляет ссылку на чат выбранного дома"""
     try:
@@ -1054,167 +1572,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         logger.error(f"Ошибка отправки: {e}")
         return False
 
-# ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start с поддержкой deep linking"""
-    user = update.effective_user
-    
-    if not context.user_data.get("step"):
-        context.user_data.clear()
-    
-    # Проверка блокировки
-    if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text(
-            "🚫 Вы заблокированы и не можете пользоваться ботом. "
-            "Если Вы считаете, что заблокированы по ошибке, "
-            "попросите соседа написать администратору домового чата."
-        )
-        
-        # Автоматически закрываем все активные заявки
-        apps = load_json(APPS_FILE, {})
-        user_app = apps.get(str(user.id))
-        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
-            user_app["status"] = STATUS_TEXT["rejected"]
-            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
-            move_to_archive(str(user.id), user_app)
-        
-        return
-    
-    cleanup_old_apps()
-    
-    # ============ DEEP LINKING: Обработка ?start=house1 ============
-    args = context.args
-    
-    if args and len(args) > 0:
-        house_param = args[0]  # Будет "house1", "house2" и т.д.
-        
-        # Проверяем, существует ли такой дом
-        if house_param in HOUSES:
-            # ДА! Пользователь пришел по специальной ссылки
-            context.user_data["house_id"] = house_param
-            
-            if is_admin(user.id):
-                # Админ даже со специальной ссылки видит админ-панель
-                update_info = (
-                    f"👑 *Административная панель*\n"
-                    f"🔄 Версия: `{BOT_VERSION}`\n"
-                    f"🏘️ Домов настроено: {len(HOUSES)}"
-                )
-                
-                await update.message.reply_text(
-                    update_info,
-                    parse_mode="Markdown",
-                    reply_markup=ADMIN_MENU
-                )
-            else:
-                # Обычный пользователь - приветствие
-                house = HOUSES[house_param]
-                
-                welcome_text = (
-                    f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
-                    f"🏠 Ваш дом: {house['address']}\n\n"
-                    f"📝 *Для подачи заявки в домовой чат:*\n"
-                    f"1. Укажите номер квартиры\n"
-                    f"2. Предоставьте кадастровый номер\n\n"
-                    f"⏱️ *Рассмотрение:* 1-3 дня\n"
-                    f"✅ *После одобрения:* получите ссылку на чат"
-                )
-                
-                await update.message.reply_text(
-                    welcome_text,
-                    parse_mode="Markdown",
-                    reply_markup=create_user_menu()
-                )
-                
-                # Небольшая пауза
-                await asyncio.sleep(1)
-                
-                context.user_data["step"] = "flat"
-                
-                await send_app_message(
-                    user.id, context,
-                    f"📝 *Заявка {COMPLEX}:*\n"
-                    f"🏠 Адрес: {house['address']}\n\n"
-                    f"Введите номер вашей квартиры:",
-                    create_user_menu_during_entry()
-                )
-            
-            # Выходим из функции - дом уже выбран
-            return
-        # Если house_param не найден в HOUSES - продолжаем как обычно
-    
-    # СТАНДАРТНОЕ ПРИВЕТСТВИЕ
-    if is_admin(user.id):
-        update_info = (
-            f"👑 *Административная панель*\n"
-            f"🔄 Версия: `{BOT_VERSION}`\n"
-            f"🏘️ Домов настроено: {len(HOUSES)}"
-        )
-        
-        await update.message.reply_text(
-            update_info,
-            parse_mode="Markdown",
-            reply_markup=ADMIN_MENU
-        )
-    else:
-        # Приветствие для обычного входа
-        welcome_text = (
-            f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
-            f"📝 *Для подачи заявки в домовой чат:*\n"
-            f"1. Выберите ваш дом\n"
-            f"2. Укажите номер квартиры\n"
-            f"3. Предоставьте кадастровый номер\n\n"
-            f"⏱️ *Рассмотрение:* 1-3 дня\n"
-            f"✅ *После одобрения:* получите ссылку на чат"
-        )
-        
-        await update.message.reply_text(
-            welcome_text,
-            parse_mode="Markdown",
-            reply_markup=create_user_menu()
-        )
-        
-        # Если несколько домов И пользователь без специальной ссылки
-        if len(HOUSES) > 1:
-            # Небольшая пауза
-            await asyncio.sleep(1)
-            
-            # Первое окно: выбор дома
-            houses_text = (
-                f"📝 *Заявка {COMPLEX}:*\n\n"
-                f"🏠 *Выберите ваш адрес:*\n\n"
-            )
-            
-            for idx, (house_id, house) in enumerate(HOUSES.items(), 1):
-                houses_text += f"{idx}. {house['address']}\n"
-            
-            houses_text += f"\nНапишите номер (1-{len(HOUSES)}):"
-            
-            context.user_data["step"] = "select_house"
-            
-            await send_app_message(
-                user.id, context,
-                houses_text,
-                create_user_menu()
-            )
-        else:
-            # Если только один дом - небольшая пауза
-            await asyncio.sleep(1)
-            
-            house_id = list(HOUSES.keys())[0]
-            context.user_data["house_id"] = house_id
-            context.user_data["step"] = "flat"
-            
-            house = HOUSES[house_id]
-            # Второе окно: ввод квартиры
-            await send_app_message(
-                user.id, context,
-                f"📝 *Заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house['address']}\n\n"
-                f"Введите номер вашей квартиры:",
-                create_user_menu_during_entry()
-            )
-
+# ================== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ==================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик текстовых сообщений"""
     user = update.effective_user
@@ -1227,7 +1585,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "попросите соседа написать администратору домового чата."
         )
         
-        # Автоматически закрываем все активные заявки
+        # Автоматически отклоняем активную заявку
         apps = load_json(APPS_FILE, {})
         user_app = apps.get(str(user.id))
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
@@ -1314,6 +1672,16 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Обработка отмены (сообщение в один символ)
     if len(text) == 1 and context.user_data.get("step") == "contact":
         context.user_data.clear()
+        # Удаляем временные файлы, если они есть
+        contact_data = context.user_data.get("contact_data", {})
+        if contact_data:
+            for file_path in contact_data.get("files", []):
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except:
+                    pass
+        
         await update.message.reply_text(
             "❌ *Отправка сообщения отменена.*",
             parse_mode="Markdown",
@@ -1346,9 +1714,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         welcome_text = (
             f"👋 *Начинаем оформление заявки {COMPLEX}:*\n\n"
             f"📝 *Вам потребуется:*\n"
-            f"1. Выбрать дом\n"
-            f"2. Указать номер квартиры\n"
-            f"3. Предоставить кадастровый номер\n\n"
+            f"1. Выберите ваш дом (если их несколько)\n"
+            f"2. Укажите номер квартиры\n"
+            f"3. Предоставьте кадастровый номер\n\n"
             f"⏱️ *Срок рассмотрения:* 1-3 дня"
         )
         
@@ -1428,26 +1796,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if step == "contact":
-        # Проверяем на отмену (сообщение в один символ)
-        if len(text) == 1:
-            context.user_data.clear()
-            # Удаляем временные файлы, если они есть
-            contact_data = context.user_data.get("contact_data", {})
-            if contact_data:
-                for file_path in contact_data.get("files", []):
-                    try:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
-                    except:
-                        pass
-            
-            await update.message.reply_text(
-                "❌ *Отправка сообщения отменена.*",
-                parse_mode="Markdown",
-                reply_markup=create_user_menu(user.id)
-            )
-            return
-            
         context.user_data["contact_data"]["text"] = text
         await send_contact_message(update, context, user)
         return
@@ -1668,269 +2016,23 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await blacklist_command(update, context)
         return
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик файлов"""
-    user = update.effective_user
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Главный обработчик callback-запросов"""
+    query = update.callback_query
+    await query.answer()
     
-    # Проверка блокировки
-    if not is_admin(user.id) and is_blocked(user.id):
-        await update.message.reply_text(
-            "🚫 Вы заблокированы и не можете пользоваться ботом. "
-            "Если Вы считаете, что заблокированы по ошибке, "
-            "попросите соседа написать администратору домового чата."
-        )
-        
-        # Автоматически закрываем все активные заявки
-        apps = load_json(APPS_FILE, {})
-        user_app = apps.get(str(user.id))
-        if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
-            user_app["status"] = STATUS_TEXT["rejected"]
-            user_app["reject_reason"] = "⛔ Пользователь заблокирован"
-            move_to_archive(str(user.id), user_app)
-        
-        return
+    data = query.data
+    user = query.from_user
     
-    step = context.user_data.get("step")
-    
-    # Обработка файлов для сообщения админу
-    if step == "contact":
-        if update.message.document:
-            file = update.message.document
-        elif update.message.photo:
-            file = update.message.photo[-1]
-        else:
-            return
-        
-        try:
-            # Скачиваем файл
-            timestamp = int(datetime.now().timestamp())
-            ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
-            
-            # Получаем данные файла
-            tg_file = await file.get_file()
-            file_data = await tg_file.download_as_bytearray()
-            
-            # Сохраняем локально
-            file_path = save_file_locally(
-                bytes(file_data),
-                user.id,
-                "contact",
-                ext
-            )
-            
-            # Инициализируем contact_data если его нет
-            if "contact_data" not in context.user_data:
-                context.user_data["contact_data"] = {"text": "", "files": []}
-            
-            # Добавляем файл в список
-            context.user_data["contact_data"]["files"].append(file_path)
-            
-            # Проверяем, есть ли текст в сообщении (caption)
-            text = update.message.caption or ""
-            if text:
-                # Проверяем на команду отмены (сообщение в один символ)
-                if len(text.strip()) == 1:
-                    context.user_data.clear()
-                    # Удаляем временный файл
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
-                    await update.message.reply_text(
-                        "❌ *Отправка сообщения отменена.*",
-                        parse_mode="Markdown",
-                        reply_markup=create_user_menu(user.id)
-                    )
-                    return
-                    
-                context.user_data["contact_data"]["text"] = text
-                # Если есть caption, сразу отправляем сообщение
-                await send_contact_message(update, context, user)
-            else:
-                # Если нет caption, просим добавить текст
-                await update.message.reply_text(
-                    "✅ Файл получен. Теперь напишите текст сообщения:",
-                    parse_mode="Markdown",
-                    reply_markup=create_user_menu_during_entry()
-                )
-                
-        except Exception as e:
-            logger.error(f"Ошибка загрузки контактного файла: {e}")
-            await update.message.reply_text("❌ Ошибка при загрузке файла.")
-        return
-    
-    # Обработка файлов для заявки (кадастровый номер)
-    if step != "cad":
-        await update.message.reply_text("⚠️ Сначала введите номер квартиры.")
-        return
-    
-    if update.message.document:
-        file = update.message.document
-    elif update.message.photo:
-        file = update.message.photo[-1]
+    # Разделяем обработку
+    if data in ["cad_ok", "cad_no"]:
+        await handle_user_callback(query, context, data, user)
+    elif data.startswith("archive_"):
+        await handle_archive_callback(query, context, data, user)
+    elif data.startswith("bl_"):
+        await handle_blacklist_callback(query, context, data, user)
     else:
-        return
-    
-    try:
-        # Скачиваем файл
-        timestamp = int(datetime.now().timestamp())
-        ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
-        
-        # Получаем данные файла
-        tg_file = await file.get_file()
-        file_data = await tg_file.download_as_bytearray()
-        
-        # Сохраняем локально
-        file_path = save_file_locally(
-            bytes(file_data),
-            user.id,
-            "application",
-            ext
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка загрузки файла: {e}")
-        await update.message.reply_text("❌ Ошибка при загрузке файла.")
-        return
-    
-    # Сохраняем заявку
-    apps = load_json(APPS_FILE, {})
-    
-    apps[str(user.id)] = {
-        "user_id": user.id,
-        "name": user.full_name,
-        "username": user.username,
-        "house_id": context.user_data.get("house_id", ""),
-        "flat": context.user_data.get("flat", ""),
-        "cadastre": context.user_data.get("cad", ""),
-        "file": file_path,
-        "status": STATUS_TEXT["pending"],
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    
-    if save_json_with_backup(APPS_FILE, apps):
-        # Получаем адрес дома для уведомления
-        house_id = context.user_data.get("house_id")
-        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
-        
-        # Уведомляем администраторов
-        await notify_admins_about_new_app(
-            context, user.id, user.full_name, user.username,
-            context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
-        )
-        
-        # Исправление: сохраняем меню после подачи заявки
-        await update.message.reply_text(
-            f"✅ *Заявка отправлена на рассмотрение!*\n\n"
-            f"📝 *Ваша заявка {COMPLEX}:*\n"
-            f"🏠 Адрес: {house_address}, кв. {context.user_data.get('flat', '-')}\n"
-            f"📄 Кадастровый номер: {context.user_data.get('cad', '-')}\n\n"
-            f"⏳ Статус: На рассмотрении\n\n"
-            f"📋 Используйте кнопку «Статус заявки» для отслеживания.",
-            parse_mode="Markdown",
-            reply_markup=create_user_menu_after_app_submission()  # Исправлено
-        )
-        
-        # Совет про имя и ник
-        if should_show_advice(user):
-            await context.bot.send_message(user.id, ADVICE_TEXT, parse_mode="Markdown")
-        
-        # Очищаем сообщения заявки
-        try:
-            await delete_previous_app_messages(user.id, context)
-        except:
-            pass
-        
-        context.user_data.clear()
-    else:
-        await update.message.reply_text("❌ Ошибка при сохранении заявки.")
-
-async def handle_user_callback(query, context, data, user):
-    """Обработка callback'ов от пользователей"""
-    if data == "cad_ok":
-        apps = load_json(APPS_FILE, {})
-        
-        apps[str(user.id)] = {
-            "user_id": user.id,
-            "name": user.full_name,
-            "username": user.username,
-            "house_id": context.user_data["house_id"],
-            "flat": context.user_data["flat"],
-            "cadastre": context.user_data["cad"],
-            "status": STATUS_TEXT["pending"],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        
-        if save_json_with_backup(APPS_FILE, apps):
-            # Получаем адрес дома для уведомления
-            house_id = context.user_data["house_id"]
-            house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
-            
-            # Уведомляем администраторов
-            await notify_admins_about_new_app(
-                context, user.id, user.full_name, user.username,
-                context.user_data['flat'], context.user_data['cad']
-            )
-            
-            # Удаляем сообщения заявки
-            try:
-                await delete_previous_app_messages(user.id, context)
-            except Exception as e:
-                logger.error(f"Ошибка удаления сообщений: {e}")
-            
-            # Исправление: сохраняем меню после подачи заявки
-            await query.edit_message_text(
-                f"✅ *Заявка отправлена на рассмотрение!*\n\n"
-                f"📝 *Ваша заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
-                f"📄 Кадастровый номер: {context.user_data['cad']}\n\n"
-                f"⏳ Статус: На рассмотрении",
-                parse_mode="Markdown"
-            )
-            
-            # Совет про имя и ник
-            if should_show_advice(user):
-                await context.bot.send_message(user.id, ADVICE_TEXT, parse_mode="Markdown")
-            
-            # Отправляем меню (исправлено)
-            await context.bot.send_message(
-                user.id,
-                "📋 Используйте кнопку «Статус заявки» для отслеживания.",
-                reply_markup=create_user_menu_after_app_submission()
-            )
-            
-            context.user_data.clear()
-        else:
-            await query.edit_message_text("❌ Ошибка при сохранении заявки.")
-        return
-    
-    elif data == "cad_no":
-        context.user_data.pop("cad", None)
-        context.user_data["step"] = "cad"
-        
-        house_id = context.user_data.get("house_id")
-        house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
-        flat_number = context.user_data['flat']
-        
-        # Используем query для редактирования текущего сообщения
-        try:
-            await query.edit_message_text(
-                f"📝 *Заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
-                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
-                parse_mode="Markdown",
-                reply_markup=None
-            )
-        except:
-            # Если не удалось отредактировать, отправляем новое
-            await send_app_message(
-                user.id, context,
-                f"📝 *Заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
-                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
-                create_user_menu_during_entry()
-            )
-        return
+        await handle_admin_callback(query, context, data, user)
 
 async def handle_admin_callback(query, context, data, user):
     """Обработка callback'ов от администраторов"""
@@ -2595,24 +2697,6 @@ async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Главный обработчик callback-запросов"""
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    user = query.from_user
-    
-    # Разделяем обработку
-    if data in ["cad_ok", "cad_no"]:
-        await handle_user_callback(query, context, data, user)
-    elif data.startswith("archive_"):
-        await handle_archive_callback(query, context, data, user)
-    elif data.startswith("bl_"):
-        await handle_blacklist_callback(query, context, data, user)
-    else:
-        await handle_admin_callback(query, context, data, user)
-
 async def handle_blacklist_callback(query, context, data, user):
     """Обработка callback'ов черного списка"""
     if not is_admin(user.id):
@@ -2803,6 +2887,40 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("archive_replying_to", None)
         return
 
+async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает контекстную помощь в зависимости от текущего этапа пользователя"""
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
+    
+    step = context.user_data.get("step")
+    if step == "flat":
+        await update.message.reply_text(
+            "Пожалуйста, введите номер вашей квартиры:\n\n"
+            "📌 *Как вводить:*\n"
+            "• Просто цифры: 12\n"
+            "• Цифры с буквой: 12А, 25Б",
+            parse_mode="Markdown"
+        )
+    elif step == "cad":
+        await update.message.reply_text(
+            "Введите кадастровый номер:\n\n"
+            "📌 *Как вводить:*\n"
+            "• Формат: XX:XX:XXXXXXX:XXX\n\n"
+            "📌 *Можно:*\n"
+            "• Использовать пробелы вместо двоеточий\n"
+            "• Написать слитно (только цифры)\n"
+            "• Отправить файл документа с номером (фото/PDF)",
+            parse_mode="Markdown"
+        )
+    elif step == "contact":
+        await update.message.reply_text(
+            "Напишите сообщение или прикрепите файл:\n\n"
+            "📌 *Как отправить:*\n"
+            "Избегайте слов: зачем, почему, помощь, справка, кадастр.\n"
+            "Иначе бот будет выводить справочную информацию.\n"
+            "ℹ️ Чтобы отменить отправку, напишите любое сообщение в один символ.",
+            parse_mode="Markdown"
+        )
+
 # ================== ЗАПУСК БОТА И HTTP СЕРВЕРА ==================
 async def main_async() -> None:
     """Основная асинхронная функции запуска бота и HTTP сервера"""
@@ -2817,8 +2935,10 @@ async def main_async() -> None:
     # === ВОССТАНОВЛЕНИЕ ДАННЫХ ИЗ GITHUB ===
     await load_data_from_github()
     
-    # Очистка старых данных
-    cleanup_old_apps()
+    # Первая очистка при запуске
+    initial_cleanup = cleanup_data()
+    if initial_cleanup > 0:
+        logger.info(f"🧹 Первоначальная очистка: {initial_cleanup} записей")
     
     logger.info(f"🏘️ Название ЖК: {COMPLEX}")
     logger.info(f"🏠 Домов настроено: {len(HOUSES)}")
@@ -2873,6 +2993,15 @@ async def main_async() -> None:
         # Обычные текстовые сообщения
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
         
+        # Запускаем фоновую задачу для ежедневной очистки
+        app.job_queue.run_repeating(
+            scheduled_cleanup,
+            interval=86400,  # 24 часа в секундах
+            first=10,       # Первый запуск через 10 секунд
+            name="daily_cleanup"
+        )
+        logger.info("✅ Фоновая задача ежедневной очистки запущена")
+        
         # Инициализируем и запускаем бота с защитой от конфликтов
         await app.initialize()
         await app.start()
@@ -2905,6 +3034,7 @@ async def main_async() -> None:
         logger.info("✅ Бот успешно запущен и готов к работе!")
         logger.info("📡 Ожидание сообщений...")
         logger.info("🔄 UptimeRobot может мониторить по адресу: /health")
+        logger.info("🧹 Ежедневная очистка запланирована (каждые 24 часа)")
         
         # Бесконечный цикл - работаем до остановки
         stop_event = asyncio.Event()
