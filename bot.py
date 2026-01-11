@@ -25,8 +25,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
-    JobQueue
+    filters
 )
 import telegram.error
 
@@ -38,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.5.0"  # Мажорное обновление: +0.1.0 (рефакторинг, новые фичи)
+BOT_VERSION = "1.5.0"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -60,12 +59,11 @@ while True:
     HOUSES[f"house{i}"] = {
         "id": f"house{i}",
         "address": house_address,
-        "chat_link": chat_link or ""  # CHAT может быть пустым
+        "chat_link": chat_link or ""
     }
     
     i += 1
 
-# Если дома не настроены - сообщение
 if not HOUSES:
     logger.warning("⚠️ Дома не настроены в переменных окружения!")
 
@@ -78,8 +76,8 @@ BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 ARCHIVE_FILE = os.path.join(DATA_DIR, "archive.json")
 
 # Настройки
-ARCHIVE_KEEP_DAYS = 30  # Архив храним 30 дней
-ACTIVE_APP_EXPIRE_DAYS = 7  # Активные заявки храним 7 дней
+ARCHIVE_KEEP_DAYS = 30
+ACTIVE_APP_EXPIRE_DAYS = 7
 HTTP_PORT = int(os.getenv("PORT", "8080"))
 
 # Шаблоны причин отклонения
@@ -97,7 +95,7 @@ REPLY_TEMPLATES = [
     "Свяжемся с вами для уточнения деталей"
 ]
 
-# Текстовые константы - ИСПРАВЛЕНА ГРАММАТИЧЕСКАЯ ОШИБКА
+# Текстовые константы
 HELP_TEXT = (
     "❓ *Зачем нужен кадастровый номер?*\n\n"
     "Кадастровый номер нужен для подтверждения проживания в доме.\n\n"
@@ -166,7 +164,6 @@ class GitHubStorage:
             encoded = base64.b64encode(content.encode('utf-8')).decode('utf-8')
             
             async with aiohttp.ClientSession() as session:
-                # Сначала проверяем существует ли файл
                 async with session.get(
                     f"{self.base_url}/{filename}",
                     headers=self.headers
@@ -176,7 +173,6 @@ class GitHubStorage:
                         existing = await response.json()
                         sha = existing.get("sha")
                 
-                # Обновляем или создаем файл
                 payload = {
                     "message": f"Bot backup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                     "content": encoded,
@@ -241,16 +237,13 @@ class GitHubStorage:
         except:
             return False
 
-# Глобальный экземпляр GitHub хранилища
 github_storage = GitHubStorage()
 
-# ================== HTTP СЕРВЕР ДЛЯ UPTIMEROBOT ==================
+# ================== HTTP СЕРВЕР ==================
 async def handle_health(request):
-    """Обработчик health-check запросов для UptimeRobot"""
     return web.Response(text="🤖 Telegram Bot is running")
 
 async def handle_stats(request):
-    """Обработчик статистики"""
     try:
         apps = load_json(APPS_FILE, {})
         archive = load_json(ARCHIVE_FILE, {})
@@ -285,10 +278,8 @@ async def handle_stats(request):
         return web.json_response({"error": str(e)}, status=500)
 
 async def start_http_server(port: int = 8080):
-    """Запуск HTTP сервера для health checks"""
     app = web.Application()
     
-    # Регистрируем маршруты
     app.router.add_get('/', handle_health)
     app.router.add_get('/health', handle_health)
     app.router.add_get('/ping', handle_health)
@@ -301,18 +292,14 @@ async def start_http_server(port: int = 8080):
     await site.start()
     
     logger.info(f"✅ HTTP сервер запущен на порту {port}")
-    logger.info(f"📡 Доступны endpoints: /health, /ping, /stats")
-    
     return runner
 
 # ================== УТИЛИТЫ ==================
 def ensure_dirs() -> None:
-    """Создает необходимые директории"""
     for directory in [DATA_DIR, FILES_DIR, CONTACT_FILES_DIR]:
         os.makedirs(directory, exist_ok=True)
 
 def load_json(path: str, default) -> Any:
-    """Загружает JSON файл"""
     if not os.path.exists(path):
         return default
     try:
@@ -323,7 +310,6 @@ def load_json(path: str, default) -> Any:
         return default
 
 def save_json(path: str, data: Any) -> bool:
-    """Сохраняет данные в JSON файл"""
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -333,16 +319,11 @@ def save_json(path: str, data: Any) -> bool:
         return False
 
 def save_json_with_backup(path: str, data: Any) -> bool:
-    """Сохраняет JSON локально и в GitHub"""
-    
-    # 1. Сохраняем локально
     if not save_json(path, data):
         return False
     
-    # 2. Асинхронно сохраняем в GitHub
     filename = os.path.basename(path)
     
-    # Определяем что это за файл для GitHub
     if "applications" in filename:
         gh_filename = "applications.json"
     elif "blacklist" in filename:
@@ -352,7 +333,6 @@ def save_json_with_backup(path: str, data: Any) -> bool:
     else:
         gh_filename = filename
     
-    # Запускаем асинхронную загрузку
     asyncio.create_task(
         github_storage.upload_json(gh_filename, data)
     )
@@ -360,64 +340,50 @@ def save_json_with_backup(path: str, data: Any) -> bool:
     return True
 
 def save_file_locally(file_data: bytes, user_id: int, file_type: str, extension: str = ".jpg") -> str:
-    """Сохраняет файл локально"""
     timestamp = int(datetime.now().timestamp())
     
     if file_type == "application":
         filename = f"{user_id}_{timestamp}{extension}"
         local_path = os.path.join(FILES_DIR, filename)
-    else:  # contact
+    else:
         filename = f"contact_{user_id}_{timestamp}{extension}"
         local_path = os.path.join(CONTACT_FILES_DIR, filename)
     
-    # Сохраняем локально
     with open(local_path, "wb") as f:
         f.write(file_data)
     
     return local_path
 
 def is_admin(user_id: int) -> bool:
-    """Проверяет, является ли пользователь администратором"""
     return user_id in ADMINS
 
 def is_blocked(user_id: int) -> bool:
-    """Проверяет, заблокирован ли пользователь"""
     return user_id in load_json(BLACKLIST_FILE, [])
 
 def has_empty_name(user) -> bool:
-    """
-    Проверяет, является ли имя пользователя пустым или нечитаемым
-    """
     if not user.full_name:
         return True
     
     name = user.full_name.strip()
-    
-    # Проверка на пустое имя
     if not name:
         return True
     
-    # Проверка на слишком короткое имя (меньше 2 символов)
     if len(name) < 2:
         return True
     
-    # Проверка, что имя состоит не только из пробелов и спецсимволов
     letters_only = ''.join(c for c in name if c.isalpha())
-    if len(letters_only) < 1:  # Должна быть хотя бы одна буква
+    if len(letters_only) < 1:
         return True
     
     return False
 
 def has_empty_username(user) -> bool:
-    """Проверяет, отсутствует ли username"""
     return not user.username or not user.username.strip()
 
 def should_show_advice(user) -> bool:
-    """Определяет, нужно ли показывать совет об имени и нике"""
     return has_empty_name(user) or has_empty_username(user)
 
 def has_empty_name_from_data(name: str) -> bool:
-    """Проверяет имя из данных заявки на пустоту"""
     if not name:
         return True
     
@@ -425,12 +391,10 @@ def has_empty_name_from_data(name: str) -> bool:
     if len(name_str) < 2:
         return True
     
-    # Проверяем, есть ли буквы в имени
     has_letters = any(c.isalpha() for c in name_str)
     return not has_letters
 
 def validate_flat_number(text: str) -> bool:
-    """Проверяет валидность номера квартиры"""
     text = text.strip()
     if not text:
         return False
@@ -442,7 +406,6 @@ def validate_flat_number(text: str) -> bool:
     return bool(re.match(pattern, text))
 
 def normalize_cadastre(text: str) -> Optional[str]:
-    """Нормализует кадастровый номер"""
     digits = ''.join(c for c in text if c.isdigit())
     
     if len(digits) < 12 or len(digits) > 20:
@@ -454,21 +417,17 @@ def normalize_cadastre(text: str) -> Optional[str]:
         return None
 
 def move_to_archive(app_id: str, app_data: Dict) -> None:
-    """Переносит заявку в архив"""
     archive = load_json(ARCHIVE_FILE, {})
     archive[app_id] = app_data
     
-    # Удаляем из активных заявок
     apps = load_json(APPS_FILE, {})
     if app_id in apps:
         del apps[app_id]
         save_json_with_backup(APPS_FILE, apps)
     
-    # Сохраняем архив
     save_json_with_backup(ARCHIVE_FILE, archive)
 
 def cleanup_archive() -> int:
-    """Очищает старый архив (старше ARCHIVE_KEEP_DAYS дней)"""
     archive = load_json(ARCHIVE_FILE, {})
     now = datetime.now(timezone.utc)
     removed_count = 0
@@ -484,22 +443,20 @@ def cleanup_archive() -> int:
                 created = created.replace(tzinfo=timezone.utc)
             
             if now - created > timedelta(days=ARCHIVE_KEEP_DAYS):
-                # Удаляем файлы
                 file_path = data.get("file")
                 if file_path and os.path.exists(file_path):
                     try:
                         os.remove(file_path)
                     except OSError:
-                        pass  # Файл уже удален или недоступен
+                        pass
                 
-                # Удаляем контактные файлы
                 contact_files = data.get("contact_files", [])
                 for contact_file in contact_files:
                     if os.path.exists(contact_file):
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass  # Файл уже удален или недоступен
+                            pass
                 
                 del archive[app_id]
                 removed_count += 1
@@ -516,14 +473,12 @@ def cleanup_archive() -> int:
     return removed_count
 
 def cleanup_expired_applications() -> int:
-    """Очищает просроченные активные заявки (старше 7 дней)"""
     apps = load_json(APPS_FILE, {})
     now = datetime.now(timezone.utc)
     expired_count = 0
     
     for app_id, data in list(apps.items()):
         try:
-            # Проверяем только заявки на рассмотрении
             if data.get("status") != STATUS_TEXT["pending"]:
                 continue
                 
@@ -535,13 +490,10 @@ def cleanup_expired_applications() -> int:
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
             
-            # Если заявка старше 7 дней
             if now - created > timedelta(days=ACTIVE_APP_EXPIRE_DAYS):
-                # Меняем статус
                 data["status"] = STATUS_TEXT["rejected"]
                 data["reject_reason"] = "⏳ Время рассмотрения истекло (7 дней)"
                 
-                # Переносим в архив
                 move_to_archive(app_id, data)
                 expired_count += 1
                 
@@ -553,26 +505,21 @@ def cleanup_expired_applications() -> int:
     return expired_count
 
 async def notify_expired_applications(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Уведомляет пользователей об истечении времени заявки"""
     archive = load_json(ARCHIVE_FILE, {})
     
     for app_id, data in archive.items():
-        # Ищем только что отклоненные по времени заявки
         if data.get("reject_reason") == "⏳ Время рассмотрения истекло (7 дней)":
             try:
                 user_id = int(app_id)
                 
-                # Получаем адрес дома
                 house_address = "-"
                 house_id = data.get("house_id")
                 if house_id and house_id in HOUSES:
                     house_address = HOUSES[house_id]["address"]
                 
-                # Форматируем имя
                 user_name = data.get('name', '')
                 name_display = f", {user_name}" if user_name else ""
                 
-                # Отправляем уведомление
                 await context.bot.send_message(
                     user_id,
                     f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n"
@@ -588,18 +535,14 @@ async def notify_expired_applications(context: ContextTypes.DEFAULT_TYPE) -> Non
                 logger.error(f"❌ Ошибка отправки уведомления пользователю {app_id}: {e}")
 
 def cleanup_data() -> int:
-    """Очищает все данные: архив (30 дней) и активные заявки (7 дней)"""
     total_removed = 0
     
-    # 1. Очищаем архив (старше 30 дней)
     archive_removed = cleanup_archive()
     total_removed += archive_removed
     
-    # 2. Очищаем просроченные активные заявки (старше 7 дней)
     expired_removed = cleanup_expired_applications()
     total_removed += expired_removed
     
-    # 3. Очищаем файлы от очень старых активных заявок (старше 90 дней)
     apps = load_json(APPS_FILE, {})
     now = datetime.now(timezone.utc)
     files_cleaned = 0
@@ -614,9 +557,7 @@ def cleanup_data() -> int:
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
             
-            # Удаляем файлы только от очень старых заявок (90+ дней)
             if now - created > timedelta(days=90):
-                # Удаляем файлы заявки
                 file_path = data.get("file")
                 if file_path and os.path.exists(file_path):
                     try:
@@ -625,7 +566,6 @@ def cleanup_data() -> int:
                     except OSError:
                         pass
                 
-                # Удаляем контактные файлы
                 contact_files = data.get("contact_files", [])
                 for contact_file in contact_files:
                     if os.path.exists(contact_file):
@@ -646,13 +586,10 @@ def cleanup_data() -> int:
     return total_removed
 
 async def scheduled_cleanup(context: ContextTypes.DEFAULT_TYPE):
-    """Ежедневная фоновая очистка данных"""
     logger.info("🔄 Запуск ежедневной очистки данных...")
     
-    # Очищаем данные
     cleaned_count = cleanup_data()
     
-    # Уведомляем пользователей об истекших заявках
     await notify_expired_applications(context)
     
     if cleaned_count > 0:
@@ -661,10 +598,8 @@ async def scheduled_cleanup(context: ContextTypes.DEFAULT_TYPE):
         logger.info("✅ Ежедневная очистка завершена. Данных для очистки не найдено.")
 
 async def load_data_from_github():
-    """Загружает данные из GitHub при запуске бота"""
     logger.info("🔄 Загрузка данных из GitHub...")
     
-    # Загружаем JSON данные
     apps_data = await github_storage.download_json("applications.json")
     blacklist_data = await github_storage.download_json("blacklist.json")
     archive_data = await github_storage.download_json("archive.json")
@@ -683,7 +618,6 @@ async def load_data_from_github():
         save_json(ARCHIVE_FILE, archive_data)
         logger.info(f"✅ Загружено {len(archive_data)} архивных заявок из GitHub")
     
-    # Проверяем наличие файлового хранилища в GitHub
     has_files = await github_storage.file_exists("files/")
     if has_files:
         logger.info("ℹ️ Файлы найдены в GitHub (будут загружаться по мере необходимости)")
@@ -692,18 +626,15 @@ async def load_data_from_github():
 
 # ================== КЛАВИАТУРЫ ==================
 def create_user_menu(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
-    """Создает пользовательское меню с учетом статуса заявки"""
     apps = load_json(APPS_FILE, {})
     has_active_app = user_id and str(user_id) in apps
     
     if has_active_app:
-        # Кнопка статуса на одной строке
         keyboard_buttons = [
             ["📋 Статус заявки"],
             ["❓ Помощь", "📨 Написать админу"]
         ]
     else:
-        # Кнопка подачи заявки на одной строке
         keyboard_buttons = [
             ["📝 Подать заявку"],
             ["❓ Помощь", "📨 Написать админу"]
@@ -712,7 +643,6 @@ def create_user_menu(user_id: Optional[int] = None) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
 def create_user_menu_with_new_app() -> ReplyKeyboardMarkup:
-    """Создает меню с кнопкой для новой заявки"""
     keyboard_buttons = [
         ["📝 Подать новую заявку"],
         ["❓ Помощь", "📨 Написать админу"]
@@ -720,7 +650,6 @@ def create_user_menu_with_new_app() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
 def create_user_menu_after_app_submission() -> ReplyKeyboardMarkup:
-    """Создает меню после подачи заявки"""
     keyboard_buttons = [
         ["📋 Статус заявки"],
         ["❓ Помощь", "📨 Написать админу"]
@@ -728,7 +657,6 @@ def create_user_menu_after_app_submission() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
 def create_user_menu_during_entry() -> ReplyKeyboardMarkup:
-    """Создает меню во время ввода данных (с кнопкой Отмена)"""
     keyboard_buttons = [
         ["❌ Отмена"],
         ["❓ Помощь", "📨 Написать админу"]
@@ -745,7 +673,6 @@ ADMIN_MENU = ReplyKeyboardMarkup(
 )
 
 def create_cad_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Создает клавиатуру для подтверждения кадастрового номера"""
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Всё верно", callback_data="cad_ok"),
@@ -754,10 +681,8 @@ def create_cad_confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def create_admin_buttons(app_id: str, blocked: bool = False, status: str = None) -> InlineKeyboardMarkup:
-    """Создает инлайн-кнопки для администрирования заявки"""
     buttons = []
     
-    # Показываем кнопки только для заявок на рассмотрении
     if status == STATUS_TEXT["pending"]:
         buttons.append([
             InlineKeyboardButton("✅ Одобрить", callback_data=f"approve:{app_id}"),
@@ -765,13 +690,11 @@ def create_admin_buttons(app_id: str, blocked: bool = False, status: str = None)
         ])
         buttons.append([InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{app_id}")])
     
-    # Кнопки блокировки/разблокировки всегда показываем
     if blocked:
         buttons.append([InlineKeyboardButton("🔓 Разблокировать", callback_data=f"unblock:{app_id}")])
     else:
         buttons.append([InlineKeyboardButton("⛔ Заблокировать", callback_data=f"block:{app_id}")])
     
-    # Для архивных заявок показываем только статус
     if not buttons and status:
         return InlineKeyboardMarkup([[
             InlineKeyboardButton(f"📋 {status}", callback_data="no_action")
@@ -780,7 +703,6 @@ def create_admin_buttons(app_id: str, blocked: bool = False, status: str = None)
     return InlineKeyboardMarkup(buttons) if buttons else None
 
 def create_reject_templates_keyboard(app_id: str) -> InlineKeyboardMarkup:
-    """Создает клавиатуру с шаблонами причин отклонения"""
     buttons = []
     for template in REJECT_TEMPLATES:
         callback_data = f"reject_template:{app_id}:{hash(template) % 10000}"
@@ -790,7 +712,6 @@ def create_reject_templates_keyboard(app_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup:
-    """Создает клавиатуру с типовыми ответами"""
     buttons = []
     for template in REPLY_TEMPLATES:
         callback_data = f"reply_template:{target_user_id}:{hash(template) % 10000}"
@@ -801,13 +722,11 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
 
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start с поддержкой deep linking"""
     user = update.effective_user
     
     if not context.user_data.get("step"):
         context.user_data.clear()
     
-    # Проверка блокировки
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(
             "🚫 Вы заблокированы и не можете пользоваться ботом. "
@@ -815,7 +734,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "попросите соседа написать администратору домового чата."
         )
         
-        # Автоматически отклоняем все активные заявки
         apps = load_json(APPS_FILE, {})
         user_app = apps.get(str(user.id))
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
@@ -828,19 +746,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Проверяем и чистим данные при каждом /start
     cleanup_data()
     
-    # ============ DEEP LINKING: Обработка ?start=house1 ============
     args = context.args
     
     if args and len(args) > 0:
-        house_param = args[0]  # Будет "house1", "house2" и т.д.
+        house_param = args[0]
         
-        # Проверяем, существует ли такой дом
         if house_param in HOUSES:
-            # ДА! Пользователь пришел по специальной ссылки
             context.user_data["house_id"] = house_param
             
             if is_admin(user.id):
-                # Админ даже со специальной ссылки видит админ-панель
                 update_info = (
                     f"👑 *Административная панель*\n"
                     f"🔄 Версия: `{BOT_VERSION}`\n"
@@ -853,7 +767,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     reply_markup=ADMIN_MENU
                 )
             else:
-                # Обычный пользователь - приветствие
                 house = HOUSES[house_param]
                 
                 welcome_text = (
@@ -872,7 +785,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     reply_markup=create_user_menu()
                 )
                 
-                # Небольшая пауза
                 await asyncio.sleep(1)
                 
                 context.user_data["step"] = "flat"
@@ -885,10 +797,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     create_user_menu_during_entry()
                 )
             
-            # Выходим из функции - дом уже выбран
             return
     
-    # СТАНДАРТНОЕ ПРИВЕТСТВИЕ
     if is_admin(user.id):
         update_info = (
             f"👑 *Административная панель*\n"
@@ -902,7 +812,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ADMIN_MENU
         )
     else:
-        # Приветствие для обычного входа
         welcome_text = (
             f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
             f"📝 *Для подачи заявки в домовой чат:*\n"
@@ -919,12 +828,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=create_user_menu()
         )
         
-        # Если несколько домов И пользователь без специальной ссылки
         if len(HOUSES) > 1:
-            # Небольшая пауза
             await asyncio.sleep(1)
             
-            # Первое окно: выбор дома
             houses_text = (
                 f"📝 *Заявка {COMPLEX}:*\n\n"
                 f"🏠 *Выберите ваш адрес:*\n\n"
@@ -943,7 +849,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 create_user_menu()
             )
         else:
-            # Если только один дом - небольшая пауза
             await asyncio.sleep(1)
             
             house_id = list(HOUSES.keys())[0]
@@ -951,7 +856,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
-            # Второе окно: ввод квартиры
             await send_app_message(
                 user.id, context,
                 f"📝 *Заявка {COMPLEX}:*\n"
@@ -961,10 +865,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик файлов"""
     user = update.effective_user
     
-    # Проверка блокировки
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(
             "🚫 Вы заблокированы и не можете пользоваться ботом. "
@@ -972,7 +874,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "попросите соседа написать администратору домового чата."
         )
         
-        # Автоматически отклоняем активную заявку
         apps = load_json(APPS_FILE, {})
         user_app = apps.get(str(user.id))
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
@@ -984,7 +885,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     step = context.user_data.get("step")
     
-    # Обработка файлов для сообщения админу
     if step == "contact":
         if update.message.document:
             file = update.message.document
@@ -994,15 +894,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         
         try:
-            # Скачиваем файл
             timestamp = int(datetime.now().timestamp())
             ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
             
-            # Получаем данные файла
             tg_file = await file.get_file()
             file_data = await tg_file.download_as_bytearray()
             
-            # Сохраняем локально
             file_path = save_file_locally(
                 bytes(file_data),
                 user.id,
@@ -1010,20 +907,15 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 ext
             )
             
-            # Инициализируем contact_data если его нет
             if "contact_data" not in context.user_data:
                 context.user_data["contact_data"] = {"text": "", "files": []}
             
-            # Добавляем файл в список
             context.user_data["contact_data"]["files"].append(file_path)
             
-            # Проверяем, есть ли текст в сообщении (caption)
             text = update.message.caption or ""
             if text:
-                # Проверяем на команду отмены (сообщение в один символ)
                 if len(text.strip()) == 1:
                     context.user_data.clear()
-                    # Удаляем временный файл
                     try:
                         os.remove(file_path)
                     except:
@@ -1036,10 +928,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     return
                     
                 context.user_data["contact_data"]["text"] = text
-                # Если есть caption, сразу отправляем сообщение
                 await send_contact_message(update, context, user)
             else:
-                # Если нет caption, просим добавить текст
                 await update.message.reply_text(
                     "✅ Файл получен. Теперь напишите текст сообщения:",
                     parse_mode="Markdown",
@@ -1051,7 +941,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("❌ Ошибка при загрузке файла.")
         return
     
-    # Обработка файлов для заявки (кадастровый номер)
     if step != "cad":
         await update.message.reply_text("⚠️ Сначала введите номер квартиры.")
         return
@@ -1064,15 +953,12 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     
     try:
-        # Скачиваем файл
         timestamp = int(datetime.now().timestamp())
         ext = pathlib.Path(file.file_name or "file").suffix or ".dat" if update.message.document else ".jpg"
         
-        # Получаем данные файла
         tg_file = await file.get_file()
         file_data = await tg_file.download_as_bytearray()
         
-        # Сохраняем локально
         file_path = save_file_locally(
             bytes(file_data),
             user.id,
@@ -1085,7 +971,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ Ошибка при загрузке файла.")
         return
     
-    # Сохраняем заявку
     apps = load_json(APPS_FILE, {})
     
     apps[str(user.id)] = {
@@ -1101,17 +986,14 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     }
     
     if save_json_with_backup(APPS_FILE, apps):
-        # Получаем адрес дома для уведомления
         house_id = context.user_data.get("house_id")
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         
-        # Уведомляем администраторов
         await notify_admins_about_new_app(
             context, user.id, user.full_name, user.username,
             context.user_data.get('flat', '-'), context.user_data.get('cad', '-'), file_path
         )
         
-        # ПОЛНОЕ ПОДТВЕРЖДЕНИЕ ПОЛЬЗОВАТЕЛЮ С ДАННЫМИ
         confirmation_text = (
             f"✅ *Заявка отправлена на рассмотрение!*\n\n"
             f"📋 *Ваша заявка {COMPLEX}:*\n"
@@ -1128,7 +1010,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=create_user_menu_after_app_submission()
         )
         
-        # Совет про имя и ник (если нужно)
         if should_show_advice(user):
             advice_message = (
                 "━━━━━━━━━━━━━━━━\n\n"
@@ -1143,7 +1024,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await context.bot.send_message(user.id, advice_message, parse_mode="Markdown")
         
-        # Очищаем сообщения заявки
         try:
             await delete_previous_app_messages(user.id, context)
         except:
@@ -1154,7 +1034,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("❌ Ошибка при сохранении заявки.")
 
 async def handle_user_callback(query, context, data, user):
-    """Обработка callback'ов от пользователей"""
     if data == "cad_ok":
         apps = load_json(APPS_FILE, {})
         
@@ -1170,23 +1049,19 @@ async def handle_user_callback(query, context, data, user):
         }
         
         if save_json_with_backup(APPS_FILE, apps):
-            # Получаем адрес дома для уведомления
             house_id = context.user_data["house_id"]
             house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
             
-            # Уведомляем администраторов
             await notify_admins_about_new_app(
                 context, user.id, user.full_name, user.username,
                 context.user_data['flat'], context.user_data['cad']
             )
             
-            # Удаляем сообщения заявки
             try:
                 await delete_previous_app_messages(user.id, context)
             except Exception as e:
                 logger.error(f"Ошибка удаления сообщений: {e}")
             
-            # ПОЛНОЕ ПОДТВЕРЖДЕНИЕ С ДАННЫМИ
             await query.edit_message_text(
                 f"✅ *Заявка отправлена на рассмотрение!*\n\n"
                 f"📋 *Ваша заявка {COMPLEX}:*\n"
@@ -1197,14 +1072,12 @@ async def handle_user_callback(query, context, data, user):
                 parse_mode="Markdown"
             )
             
-            # Отправляем меню
             await context.bot.send_message(
                 user.id,
                 "📝 Используйте кнопку «Статус заявки» для отслеживания.",
                 reply_markup=create_user_menu_after_app_submission()
             )
             
-            # Совет про имя и ник (если нужно)
             if should_show_advice(user):
                 advice_message = (
                     "━━━━━━━━━━━━━━━━\n\n"
@@ -1232,7 +1105,6 @@ async def handle_user_callback(query, context, data, user):
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         flat_number = context.user_data['flat']
         
-        # Используем query для редактирования текущего сообщения
         try:
             await query.edit_message_text(
                 f"📝 *Заявка {COMPLEX}:*\n"
@@ -1242,7 +1114,6 @@ async def handle_user_callback(query, context, data, user):
                 reply_markup=None
             )
         except:
-            # Если не удалось отредактировать, отправляем новое
             await send_app_message(
                 user.id, context,
                 f"📝 *Заявка {COMPLEX}:*\n"
@@ -1254,10 +1125,8 @@ async def handle_user_callback(query, context, data, user):
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 async def delete_previous_app_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удаляет предыдущие сообщения заявки по user_id"""
     user_data = context.user_data
     
-    # Удаляем сохраненные message_id
     msg_ids = user_data.get("app_message_ids", [])
     for msg_id in msg_ids:
         try:
@@ -1265,25 +1134,18 @@ async def delete_previous_app_messages(user_id: int, context: ContextTypes.DEFAU
         except:
             pass
     
-    # Очищаем список
     user_data["app_message_ids"] = []
 
 async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE, 
                           text: str, keyboard=None) -> int:
-    """
-    Отправляет сообщение заявки и сохраняет его ID
-    Возвращает message_id
-    """
     user_data = context.user_data
     
     try:
-        # Удаляем предыдущие сообщения заявки
         await delete_previous_app_messages(user_id, context)
     except Exception as e:
         logger.error(f"Ошибка удаления сообщений: {e}")
     
     try:
-        # Отправляем новое сообщение
         message = await context.bot.send_message(
             user_id,
             text,
@@ -1291,7 +1153,6 @@ async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE,
             reply_markup=keyboard
         )
         
-        # Сохраняем message_id
         if "app_message_ids" not in user_data:
             user_data["app_message_ids"] = []
         user_data["app_message_ids"].append(message.message_id)
@@ -1303,7 +1164,6 @@ async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE,
         return None
 
 async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
-    """Отправка сообщения администратору"""
     contact_data = context.user_data.get("contact_data", {})
     text = contact_data.get("text", "")
     files = contact_data.get("files", [])
@@ -1315,7 +1175,6 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
     
-    # Форматируем имя и ник
     user_name = user.full_name if user.full_name else "-"
     username_display = f"@{user.username}" if user.username else "-"
     
@@ -1342,7 +1201,6 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 ]])
             )
             
-            # Отправляем файлы
             for file_path in files:
                 try:
                     ext = pathlib.Path(file_path).suffix.lower()
@@ -1370,7 +1228,6 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"Ошибка отправки сообщения админу {admin_id}: {e}")
     
-    # Очищаем временные файлы
     for file_path in files:
         try:
             if os.path.exists(file_path):
@@ -1378,7 +1235,6 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except:
             pass
     
-    # Возвращаем пользователя в главное меню
     context.user_data.clear()
     
     if sent_to_admins:
@@ -1395,17 +1251,14 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 async def process_rejection(context, app_id, reason, query=None) -> bool:
-    """Обработка отклонения заявки"""
     apps = load_json(APPS_FILE, {})
     
     if app_id in apps:
         apps[app_id]["status"] = STATUS_TEXT["rejected"]
         apps[app_id]["reject_reason"] = reason
         
-        # Переносим в архив сразу
         move_to_archive(app_id, apps[app_id])
         
-        # Уведомляем пользователя
         try:
             await context.bot.send_message(
                 int(app_id),
@@ -1433,9 +1286,6 @@ async def process_rejection(context, app_id, reason, query=None) -> bool:
 
 async def notify_admins_about_new_app(context, user_id: int, user_name: str, username: str, 
                                      flat: str, cadastre: str, file_path: Optional[str] = None) -> None:
-    """Уведомляет администраторов о новой заявке"""
-    
-    # Получаем полный адрес
     apps = load_json(APPS_FILE, {})
     user_app = apps.get(str(user_id))
     house_id = user_app.get("house_id") if user_app else None
@@ -1444,7 +1294,6 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
     if house_id and house_id in HOUSES:
         house_address = HOUSES[house_id]["address"]
     
-    # Форматируем имя и ник
     display_name = user_name if user_name else "-"
     username_display = f"@{username}" if username else "-"
     
@@ -1499,7 +1348,6 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
                 pass
 
 async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
-    """Отправляет ссылку на чат выбранного дома"""
     try:
         house_id = user_data.get("house_id")
         if not house_id or house_id not in HOUSES:
@@ -1523,7 +1371,6 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
             )
             return False
         
-        # Форматируем имя и ник
         user_name = user_data.get('name', '-')
         username = user_data.get('username')
         nick_display = f"@{username}" if username else "-"
@@ -1546,7 +1393,6 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
             disable_web_page_preview=True
         )
         
-        # Простое уведомление админа
         flat_display = user_data.get('flat', '-')
         if flat_display != '-':
             flat_display = f"кв. {flat_display}"
@@ -1574,10 +1420,8 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
 
 # ================== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ==================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик текстовых сообщений"""
     user = update.effective_user
     
-    # Проверка блокировки
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(
             "🚫 Вы заблокированы и не можете пользоваться ботом. "
@@ -1585,7 +1429,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "попросите соседа написать администратору домового чата."
         )
         
-        # Автоматически отклоняем активную заявку
         apps = load_json(APPS_FILE, {})
         user_app = apps.get(str(user.id))
         if user_app and user_app.get("status") == STATUS_TEXT["pending"]:
@@ -1598,7 +1441,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = update.message.text.strip()
     text_lower = text.lower()
     
-    # Проверка на помощь
     if text == "❓ Помощь" or any(keyword in text_lower for keyword in AUTO_HELP_KEYWORDS):
         await show_context_help(update, context)
         return
@@ -1611,14 +1453,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                              text: str, text_lower: str) -> None:
-    """Обработка сообщений от обычных пользователей"""
     user = update.effective_user
     step = context.user_data.get("step")
     
     apps = load_json(APPS_FILE, {})
     user_app = apps.get(str(user.id))
     
-    # Проверка статуса заявки
     if text == "📋 Статус заявки":
         if not user_app:
             await update.message.reply_text(
@@ -1627,7 +1467,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        # Получаем адрес дома
         house_id = user_app.get("house_id")
         house_address = "-"
         if house_id and house_id in HOUSES:
@@ -1669,10 +1508,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     
-    # Обработка отмены (сообщение в один символ)
     if len(text) == 1 and context.user_data.get("step") == "contact":
         context.user_data.clear()
-        # Удаляем временные файлы, если они есть
         contact_data = context.user_data.get("contact_data", {})
         if contact_data:
             for file_path in contact_data.get("files", []):
@@ -1689,7 +1526,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
     
-    # Обработка отмены через кнопку
     if text == "❌ Отмена":
         context.user_data.clear()
         await update.message.reply_text(
@@ -1710,7 +1546,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        # Приветствие
         welcome_text = (
             f"👋 *Начинаем оформление заявки {COMPLEX}:*\n\n"
             f"📝 *Вам потребуется:*\n"
@@ -1726,17 +1561,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=create_user_menu()
         )
         
-        # Небольшая пауза
         await asyncio.sleep(1)
         
-        # Если только один дом
         if len(HOUSES) == 1:
             house_id = list(HOUSES.keys())[0]
             context.user_data["house_id"] = house_id
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
-            # Второе окно: ввод квартиры
             await send_app_message(
                 user.id, context,
                 f"📝 *Заявка {COMPLEX}:*\n"
@@ -1746,7 +1578,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
-        # Если несколько домов - первое окно: выбор дома
         context.user_data["step"] = "select_house"
         
         houses_text = (
@@ -1767,7 +1598,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     if step == "select_house":
-        # Обработка выбора дома через номер
         try:
             choice = int(text)
             if 1 <= choice <= len(HOUSES):
@@ -1816,7 +1646,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data["flat"] = text.strip()
         context.user_data["step"] = "cad"
         
-        # ПОЛУЧАЕМ АДРЕС ДОМА
         house_id = context.user_data.get("house_id")
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         
@@ -1848,7 +1677,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         context.user_data["cad"] = cadastre
         
-        # ПОЛУЧАЕМ ПОЛНЫЙ АДРЕС ДЛЯ ПОДТВЕРЖДЕНИЯ
         house_id = context.user_data.get("house_id")
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         flat_number = context.user_data['flat']
@@ -1870,7 +1698,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                               text: str) -> None:
-    """Обработка сообщений от администраторов"""
     user = update.effective_user
     apps = load_json(APPS_FILE, {})
     
@@ -1879,7 +1706,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("📭 Нет активных заявок.")
             return
         
-        # Показываем только заявки на рассмотрении
         pending_apps = {k: v for k, v in apps.items() 
                        if v.get("status") == STATUS_TEXT["pending"]}
         
@@ -1890,13 +1716,11 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         for uid, app in pending_apps.items():
             blocked = is_blocked(int(uid))
             
-            # Получаем информацию о доме
             house_address = "-"
             house_id = app.get("house_id")
             if house_id and house_id in HOUSES:
                 house_address = HOUSES[house_id]['address']
             
-            # Форматируем имя и ник
             user_name = app.get('name', '-')
             username = app.get('username')
             nick_display = f"@{username}" if username else "-"
@@ -1919,7 +1743,6 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if blocked:
                 app_text += "\n\n⛔ *Заблокирован*"
             
-            # Проверяем наличие файла
             file_exists = False
             if app.get("file"):
                 file_path = app["file"]
@@ -2017,14 +1840,12 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Главный обработчик callback-запросов"""
     query = update.callback_query
     await query.answer()
     
     data = query.data
     user = query.from_user
     
-    # Разделяем обработку
     if data in ["cad_ok", "cad_no"]:
         await handle_user_callback(query, context, data, user)
     elif data.startswith("archive_"):
@@ -2035,12 +1856,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await handle_admin_callback(query, context, data, user)
 
 async def handle_admin_callback(query, context, data, user):
-    """Обработка callback'ов от администраторов"""
     if not is_admin(user.id):
         await query.edit_message_text("❌ У вас нет прав для этого действия.")
         return
     
-    # Обработка отмены действий
     if data.startswith("cancel:"):
         try:
             await query.edit_message_text("↩️ Действие отменено.")
@@ -2055,7 +1874,6 @@ async def handle_admin_callback(query, context, data, user):
             await context.bot.send_message(user.id, "↩️ Ответ отменен.")
         return
     
-    # Разбираем callback_data
     if ":" in data:
         parts = data.split(":", 2)
         action = parts[0]
@@ -2066,7 +1884,6 @@ async def handle_admin_callback(query, context, data, user):
         
         target_id = parts[1]
         
-        # Обработка шаблонов причин отклонения
         if action == "reject_template":
             if len(parts) == 3:
                 template_hash = parts[2]
@@ -2081,7 +1898,6 @@ async def handle_admin_callback(query, context, data, user):
                     await process_rejection(context, target_id, template_text, query)
                     return
         
-        # Обработка типовых ответы
         if action == "reply_template":
             if len(parts) == 3:
                 template_hash = parts[2]
@@ -2123,7 +1939,6 @@ async def handle_admin_callback(query, context, data, user):
             await query.edit_message_text("❌ Неверный ID пользователя.")
             return
         
-        # Получаем информацию о пользователе
         target_user_info = ""
         target_user_nick = ""
         house_id = ""
@@ -2136,7 +1951,6 @@ async def handle_admin_callback(query, context, data, user):
             if target_id_int not in blacklist:
                 blacklist.append(target_id_int)
                 if save_json_with_backup(BLACKLIST_FILE, blacklist):
-                    # Уведомляем пользователя о блокировке
                     try:
                         await context.bot.send_message(
                             target_id_int,
@@ -2148,18 +1962,15 @@ async def handle_admin_callback(query, context, data, user):
                     except Exception as e:
                         logger.error(f"Ошибка отправки уведомления о блокировке пользователю {target_id}: {e}")
                     
-                    # Автоматически отклоняем активную заявку
                     if target_id in apps and apps[target_id].get("status") == STATUS_TEXT["pending"]:
                         apps[target_id]["status"] = STATUS_TEXT["rejected"]
                         apps[target_id]["reject_reason"] = "⛔ Пользователь заблокирован"
                         move_to_archive(target_id, apps[target_id])
                     
-                    # Получаем адрес дома
                     house_address = "-"
                     if house_id and house_id in HOUSES:
                         house_address = HOUSES[house_id]['address']
                     
-                    # Форматируем имя и ник
                     user_name = apps[target_id].get('name', '-') if target_id in apps else '-'
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
@@ -2192,7 +2003,6 @@ async def handle_admin_callback(query, context, data, user):
             if target_id_int in blacklist:
                 blacklist.remove(target_id_int)
                 if save_json_with_backup(BLACKLIST_FILE, blacklist):
-                    # Уведомляем пользователя о разблокировке
                     try:
                         await context.bot.send_message(
                             target_id_int,
@@ -2204,12 +2014,10 @@ async def handle_admin_callback(query, context, data, user):
                     except Exception as e:
                         logger.error(f"Ошибка отправки уведомления о разблокировке пользователю {target_id}: {e}")
                     
-                    # Получаем адрес дома
                     house_address = "-"
                     if house_id and house_id in HOUSES:
                         house_address = HOUSES[house_id]['address']
                     
-                    # Форматируем имя и ник
                     user_name = apps[target_id].get('name', '-') if target_id in apps else '-'
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
@@ -2241,20 +2049,16 @@ async def handle_admin_callback(query, context, data, user):
             if target_id in apps:
                 apps[target_id]["status"] = STATUS_TEXT["approved"]
                 
-                # Сохраняем перед отправкой ссылки
                 save_json_with_backup(APPS_FILE, apps)
                 
-                # Отправляем ссылку
                 success = await send_simple_invite(
                     context, 
                     target_id_int,
                     apps[target_id]
                 )
                 
-                # После отправки ссылки переносим в архив
                 move_to_archive(target_id, apps[target_id])
                 
-                # Уведомление админу
                 if success:
                     await query.edit_message_text(
                         f"✅ Заявка одобрена, ссылка отправлена и заявка перенесена в архив.",
@@ -2330,7 +2134,6 @@ async def handle_admin_callback(query, context, data, user):
     await query.edit_message_text("❌ Неизвестная команда.")
 
 async def handle_archive_callback(query, context, data, user):
-    """Обработка callback'ов архива"""
     if not is_admin(user.id):
         return
     
@@ -2339,12 +2142,11 @@ async def handle_archive_callback(query, context, data, user):
     
     if action == "archive_recent":
         archive = load_json(ARCHIVE_FILE, {})
-        # Сортируем по дате (новые сначала)
         sorted_apps = sorted(
             archive.items(),
             key=lambda x: x[1].get("created_at", ""),
             reverse=True
-        )[:10]  # Берем 10 последних
+        )[:10]
         
         if not sorted_apps:
             await query.edit_message_text("📭 В архиве нет заявок.")
@@ -2410,13 +2212,11 @@ async def handle_archive_callback(query, context, data, user):
                 await query.edit_message_text("Заявка не найдена в архиве.")
                 return
             
-            # Получаем информацию о доме
             house_address = "-"
             house_id = app.get("house_id")
             if house_id and house_id in HOUSES:
                 house_address = HOUSES[house_id]['address']
             
-            # Форматируем полную информацию
             user_name = app.get('name', '-')
             username = app.get('username')
             nick_display = f"@{username}" if username else "-"
@@ -2475,7 +2275,7 @@ async def handle_archive_callback(query, context, data, user):
             elif title == "rejected":
                 apps_list = [(k, v) for k, v in archive.items() 
                            if v.get("status") == STATUS_TEXT["rejected"]]
-            else:  # recent
+            else:
                 apps_list = sorted(
                     archive.items(),
                     key=lambda x: x[1].get("created_at", ""),
@@ -2491,24 +2291,20 @@ async def handle_archive_callback(query, context, data, user):
 
 async def show_archive_apps(context, user_id: int, apps_list: List[Tuple[str, Dict]], 
                           title: str, start_index: int = 0, page_size: int = 5) -> None:
-    """Показывает список заявок из архива"""
     end_index = min(start_index + page_size, len(apps_list))
     
     for i in range(start_index, end_index):
         app_id, app = apps_list[i]
         
-        # Получаем информацию о доме
         house_address = "-"
         house_id = app.get("house_id")
         if house_id and house_id in HOUSES:
             house_address = HOUSES[house_id]['address']
         
-        # Форматируем имя и ник
         user_name = app.get('name', '-')
         username = app.get('username')
         nick_display = f"@{username}" if username else "-"
         
-        # Дата создания
         created = ""
         if app.get("created_at"):
             try:
@@ -2533,19 +2329,16 @@ async def show_archive_apps(context, user_id: int, apps_list: List[Tuple[str, Di
         app_text += f"📌 Статус: {app.get('status', '-')}\n"
         app_text += f"📅 Дата: {created}\n"
         
-        # Добавляем пометку если пустое имя или нет ника
         if has_empty_name_from_data(user_name) or not username:
             app_text += "⚠️ *Имя/ник отсутствуют*\n\n"
         
         if app.get("reject_reason") and app.get("status") == STATUS_TEXT["rejected"]:
             app_text += f"\n*Причина отклонения:*\n{app['reject_reason']}\n"
         
-        # Кнопки для архива
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✉️ Написать", callback_data=f"archive_msg:{app_id}")]
         ])
         
-        # Проверяем наличие файла
         file_exists = False
         if app.get("file") and os.path.exists(app["file"]):
             file_exists = True
@@ -2589,10 +2382,8 @@ async def show_archive_apps(context, user_id: int, apps_list: List[Tuple[str, Di
                 reply_markup=keyboard
             )
         
-        # Небольшая задержка между сообщениями
         await asyncio.sleep(0.5)
     
-    # Кнопки навигации если есть страницы
     if len(apps_list) > page_size:
         nav_buttons = []
         if start_index > 0:
@@ -2608,11 +2399,9 @@ async def show_archive_apps(context, user_id: int, apps_list: List[Tuple[str, Di
             )
 
 async def archive_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает архив заявок"""
     if not is_admin(update.effective_user.id):
         return
     
-    # Очищаем старый архив при открытии
     cleanup_archive()
     
     archive = load_json(ARCHIVE_FILE, {})
@@ -2621,7 +2410,6 @@ async def archive_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text("📁 Архив пуст.")
         return
     
-    # Клавиатура для навигации по архиву
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("📅 Последние 10", callback_data="archive_recent"),
@@ -2650,7 +2438,6 @@ async def archive_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает черный список"""
     if not is_admin(update.effective_user.id):
         return
     
@@ -2665,17 +2452,14 @@ async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     text = f"⛔ *Черный список {COMPLEX}:*\n\n"
     
     for i, user_id in enumerate(blacklist, 1):
-        # Ищем информацию о пользователе
-        user_info = f"🆔 `{user_id}`"  # Монотипный ID для копирования
+        user_info = f"🆔 `{user_id}`"
         
-        # Проверяем в активных заявках
         if str(user_id) in apps:
             app = apps[str(user_id)]
             name = app.get('name', '-')
             username = f" @{app.get('username')}" if app.get('username') else ""
             user_info = f"🆔 `{user_id}` 👤 {name}{username}"
         
-        # Проверяем в архиве
         elif str(user_id) in archive:
             app = archive[str(user_id)]
             name = app.get('name', '-')
@@ -2686,7 +2470,6 @@ async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     text += f"\n📊 Всего: {len(blacklist)} пользователей"
     
-    # Клавиатура для управления
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("➕ Добавить по ID", callback_data="bl_add"),
@@ -2698,7 +2481,6 @@ async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 async def handle_blacklist_callback(query, context, data, user):
-    """Обработка callback'ов черного списка"""
     if not is_admin(user.id):
         return
     
@@ -2729,14 +2511,12 @@ async def handle_blacklist_callback(query, context, data, user):
         return
 
 async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработка ответов администратора"""
     user = update.effective_user
     text = update.message.text.strip()
     
     if not is_admin(user.id):
         return
     
-    # Обработка своей причины отклонения
     if "rejecting_app" in context.chat_data:
         app_id = context.chat_data["rejecting_app"]
         if await process_rejection(context, app_id, text):
@@ -2746,7 +2526,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("rejecting_app", None)
         return
     
-    # Обработка своего ответа пользователю
     if "replying_to_custom" in context.chat_data:
         target_id = context.chat_data["replying_to_custom"]
         
@@ -2763,11 +2542,9 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("replying_to_custom", None)
         return
     
-    # Обработка ввода для черного списка
     if "blacklist_action" in context.chat_data:
         action = context.chat_data["blacklist_action"]
         
-        # Проверка на отмену (любой нецифровой символ или 0)
         if not text.isdigit() or text == "0":
             await update.message.reply_text(
                 "❌ *Действие отменено.*\n"
@@ -2781,12 +2558,11 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             target_id = int(text)
             
-            # Проверяем валидность ID
             if target_id <= 0:
                 await update.message.reply_text("❌ ID должен быть положительным числом.")
                 return
                 
-            if target_id < 100000:  # Telegram ID обычно больше 100000
+            if target_id < 100000:
                 await update.message.reply_text("⚠️ ID слишком маленький. Убедитесь в правильности.")
                 return
                 
@@ -2803,7 +2579,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 blacklist.append(target_id)
                 if save_json_with_backup(BLACKLIST_FILE, blacklist):
                     
-                    # Уведомляем пользователя
                     try:
                         await context.bot.send_message(
                             target_id,
@@ -2815,7 +2590,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     except:
                         pass
                     
-                    # Автоматически отклоняем активную заявку
                     apps = load_json(APPS_FILE, {})
                     if str(target_id) in apps and apps[str(target_id)].get("status") == STATUS_TEXT["pending"]:
                         apps[str(target_id)]["status"] = STATUS_TEXT["rejected"]
@@ -2831,7 +2605,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 blacklist.remove(target_id)
                 if save_json_with_backup(BLACKLIST_FILE, blacklist):
                     
-                    # Уведомляем пользователя
                     try:
                         await context.bot.send_message(
                             target_id,
@@ -2852,14 +2625,12 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.chat_data.pop("blacklist_action", None)
         return
     
-    # Обработка ввода для архива
     if "archive_action" in context.chat_data:
         action = context.chat_data["archive_action"]
         
         if action == "search":
             archive = load_json(ARCHIVE_FILE, {})
             
-            # Ищем заявку по ID
             if text in archive:
                 apps_list = [(text, archive[text])]
                 await update.message.reply_text(f"🔍 *Найдена заявка {COMPLEX}:*", parse_mode="Markdown")
@@ -2870,7 +2641,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             context.chat_data.pop("archive_action", None)
             return
     
-    # Обработка сообщения пользователю из архива
     if "archive_replying_to" in context.chat_data:
         target_id = context.chat_data["archive_replying_to"]
         
@@ -2888,7 +2658,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
 async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показывает контекстную помощь в зависимости от текущего этапа пользователя"""
     await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
     
     step = context.user_data.get("step")
@@ -2923,7 +2692,6 @@ async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 # ================== ЗАПУСК БОТА И HTTP СЕРВЕРА ==================
 async def main_async() -> None:
-    """Основная асинхронная функции запуска бота и HTTP сервера"""
     if not BOT_TOKEN:
         logger.error("❌ Токен бота не установлен!")
         return
@@ -2932,10 +2700,8 @@ async def main_async() -> None:
     
     logger.info(f"🤖 Запуск Telegram бота версии {BOT_VERSION}")
     
-    # === ВОССТАНОВЛЕНИЕ ДАННЫХ ИЗ GITHUB ===
     await load_data_from_github()
     
-    # Первая очистка при запуске
     initial_cleanup = cleanup_data()
     if initial_cleanup > 0:
         logger.info(f"🧹 Первоначальная очистка: {initial_cleanup} записей")
@@ -2949,18 +2715,15 @@ async def main_async() -> None:
     else:
         logger.warning("⚠️ GitHub backup отключен (проверьте GITHUB_TOKEN и GITHUB_REPO)")
     
-    # Запускаем HTTP сервер для UptimeRobot
     try:
         http_runner = await start_http_server(HTTP_PORT)
     except Exception as e:
         logger.error(f"❌ Ошибка запуска HTTP сервера: {e}")
         return
     
-    # Создаем приложение бота
     try:
         app = ApplicationBuilder().token(BOT_TOKEN).build()
         
-        # Регистрируем обработчики
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("archive", archive_command))
         app.add_handler(CommandHandler("blacklist", blacklist_command))
@@ -2968,12 +2731,10 @@ async def main_async() -> None:
         app.add_handler(CallbackQueryHandler(handle_callback))
         app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, handle_file))
         
-        # Упрощенный обработчик для администраторских ответов
         async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = update.effective_user
             text = update.message.text.strip()
             
-            # Обработка отмены для пользователей (сообщение в один символ)
             if len(text) == 1 and context.user_data.get("step") == "contact":
                 context.user_data.clear()
                 await update.message.reply_text(
@@ -2990,27 +2751,26 @@ async def main_async() -> None:
         
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_text_handler), group=1)
         
-        # Обычные текстовые сообщения
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message), group=2)
         
-        # Запускаем фоновую задачу для ежедневной очистки
-        app.job_queue.run_repeating(
-            scheduled_cleanup,
-            interval=86400,  # 24 часа в секундах
-            first=10,       # Первый запуск через 10 секунд
-            name="daily_cleanup"
-        )
-        logger.info("✅ Фоновая задача ежедневной очистки запущена")
+        # Запускаем фоновую задачу для ежедневной очистки (если доступно)
+        if hasattr(app, 'job_queue') and app.job_queue is not None:
+            app.job_queue.run_repeating(
+                scheduled_cleanup,
+                interval=86400,  # 24 часа в секундах
+                first=10,       # Первый запуск через 10 секунд
+                name="daily_cleanup"
+            )
+            logger.info("✅ Фоновая задача ежедневной очистки запущена")
+        else:
+            logger.warning("⚠️ JobQueue не доступен. Очистка будет выполняться только при вызове /start")
         
-        # Инициализируем и запускаем бота с защитой от конфликтов
         await app.initialize()
         await app.start()
         
         try:
-            # Даем время предыдущим процессам завершиться
             await asyncio.sleep(2)
             
-            # Запускаем polling
             await app.updater.start_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
@@ -3034,9 +2794,12 @@ async def main_async() -> None:
         logger.info("✅ Бот успешно запущен и готов к работе!")
         logger.info("📡 Ожидание сообщений...")
         logger.info("🔄 UptimeRobot может мониторить по адресу: /health")
-        logger.info("🧹 Ежедневная очистка запланирована (каждые 24 часа)")
         
-        # Бесконечный цикл - работаем до остановки
+        if hasattr(app, 'job_queue') and app.job_queue is not None:
+            logger.info("🧹 Ежедневная очистка запланирована (каждые 24 часа)")
+        else:
+            logger.info("ℹ️ Очистка выполняется при каждом вызове /start")
+        
         stop_event = asyncio.Event()
         await stop_event.wait()
         
@@ -3049,14 +2812,12 @@ async def main_async() -> None:
         import traceback
         logger.error(f"Техническая информация: {traceback.format_exc()}")
     finally:
-        # Останавливаем HTTP сервер
         try:
             await http_runner.cleanup()
             logger.info("🌐 HTTP сервер остановлен")
         except:
             pass
         
-        # Останавливаем бота
         try:
             if 'app' in locals():
                 await app.stop()
@@ -3065,8 +2826,6 @@ async def main_async() -> None:
             pass
 
 def main() -> None:
-    """Точка входа в приложение"""
-    # Ждем, чтобы старые процессы завершились
     logger.info("⏳ Ожидание завершения предыдущих процессов...")
     time.sleep(10)
     
@@ -3077,10 +2836,7 @@ def main() -> None:
         logger.info("👋 Приложение остановлено пользователем (Ctrl+C)")
     except Exception as e:
         logger.error(f"💥 Фатальная ошибка: {e}")
-        # Ждем перед повторной попыткой
         time.sleep(30)
 
 if __name__ == "__main__":
     main()
-
-
