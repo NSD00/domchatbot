@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.4.0"
+BOT_VERSION = "1.4.2"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -77,8 +77,7 @@ BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklist.json")
 ARCHIVE_FILE = os.path.join(DATA_DIR, "archive.json")
 
 # Настройки
-AUTO_CLEAN_DAYS = 30
-ARCHIVE_KEEP_DAYS = 30
+ARCHIVE_KEEP_DAYS = 30  # Архив храним 30 дней
 HTTP_PORT = int(os.getenv("PORT", "8080"))
 
 # Шаблоны причин отклонения
@@ -574,14 +573,15 @@ def cleanup_archive() -> int:
     return removed_count
 
 def cleanup_old_apps() -> int:
-    """Удаляет старые заявки"""
-    # Очищаем архив
+    """Очищает старые данные"""
+    # Очищаем архив (старше ARCHIVE_KEEP_DAYS дней)
     archive_removed = cleanup_archive()
     
-    # Удаляем старые активные заявки (старше AUTO_CLEAN_DAYS)
+    # Активные заявки НЕ очищаем автоматически - они хранятся пока их не обработают
+    # Только удаляем файлы от очень старых активных заявок (старше 90 дней) на всякий случай
     apps = load_json(APPS_FILE, {})
     now = datetime.now(timezone.utc)
-    removed_count = 0
+    files_cleaned = 0
     
     for uid, data in list(apps.items()):
         try:
@@ -593,12 +593,15 @@ def cleanup_old_apps() -> int:
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
             
-            if now - created > timedelta(days=AUTO_CLEAN_DAYS):
+            # Удаляем файлы только от очень старых заявок (90+ дней)
+            # Но саму заявку оставляем
+            if now - created > timedelta(days=90):
                 # Удаляем файлы заявки
                 file_path = data.get("file")
                 if file_path and os.path.exists(file_path):
                     try:
                         os.remove(file_path)
+                        files_cleaned += 1
                     except OSError:
                         pass
                 
@@ -608,22 +611,14 @@ def cleanup_old_apps() -> int:
                     if os.path.exists(contact_file):
                         try:
                             os.remove(contact_file)
+                            files_cleaned += 1
                         except OSError:
                             pass
                 
-                del apps[uid]
-                removed_count += 1
-                
         except (KeyError, ValueError, AttributeError) as e:
-            logger.error(f"Ошибка при очистке заявки {uid}: {e}")
-            if uid in apps:
-                del apps[uid]
-                removed_count += 1
+            logger.error(f"Ошибка при очистке файлов заявки {uid}: {e}")
     
-    if removed_count > 0:
-        save_json_with_backup(APPS_FILE, apps)
-    
-    return archive_removed + removed_count
+    return archive_removed + files_cleaned
 
 async def load_data_from_github():
     """Загружает данные из GitHub при запуске бота"""
@@ -765,10 +760,9 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(buttons)
 
 # ================== УПРАВЛЕНИЕ СООБЩЕНИЯМИ ==================
-async def delete_previous_app_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удаляет предыдущие сообщения заявки"""
+async def delete_previous_app_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаляет предыдущие сообщения заявки по user_id"""
     user_data = context.user_data
-    user_id = update.effective_user.id
     
     # Удаляем сохраненные message_id
     msg_ids = user_data.get("app_message_ids", [])
@@ -780,32 +774,25 @@ async def delete_previous_app_messages(update: Update, context: ContextTypes.DEF
     
     # Очищаем список
     user_data["app_message_ids"] = []
-    
-    # Удаляем message_id текущего сообщения, если оно есть
-    if update.message:
-        try:
-            await update.message.delete()
-        except:
-            pass
 
-async def send_app_message(update: Update, context: ContextTypes.DEFAULT_TYPE, 
-                          text: str, keyboard=None) -> None:
+async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE, 
+                          text: str, keyboard=None) -> int:
     """
     Отправляет сообщение заявки и сохраняет его ID
+    Возвращает message_id
     """
-    user = update.effective_user
     user_data = context.user_data
     
     try:
         # Удаляем предыдущие сообщения заявки
-        await delete_previous_app_messages(update, context)
+        await delete_previous_app_messages(user_id, context)
     except Exception as e:
         logger.error(f"Ошибка удаления сообщений: {e}")
     
     try:
         # Отправляем новое сообщение
         message = await context.bot.send_message(
-            user.id,
+            user_id,
             text,
             parse_mode="Markdown",
             reply_markup=keyboard
@@ -820,22 +807,7 @@ async def send_app_message(update: Update, context: ContextTypes.DEFAULT_TYPE,
         
     except Exception as e:
         logger.error(f"Ошибка отправки сообщения: {e}")
-        # Пробуем отправить без форматирования
-        try:
-            message = await context.bot.send_message(
-                user.id,
-                text.replace("*", "").replace("_", ""),
-                reply_markup=keyboard
-            )
-            
-            if "app_message_ids" not in user_data:
-                user_data["app_message_ids"] = []
-            user_data["app_message_ids"].append(message.message_id)
-            
-            return message.message_id
-        except Exception as e2:
-            logger.error(f"Критическая ошибка отправки: {e2}")
-            return None
+        return None
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 async def show_context_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -946,7 +918,7 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if os.path.exists(file_path):
                 os.remove(file_path)
         except:
-            pass
+        pass
     
     # Возвращаем пользователя в главное меню
     context.user_data.clear()
@@ -979,7 +951,7 @@ async def process_rejection(context, app_id, reason, query=None) -> bool:
         try:
             await context.bot.send_message(
                 int(app_id),
-                f"❌ *Ваша заявка отклонена.*\n\n*Причина:* {reason}",
+                f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n*Причина:* {reason}",
                 parse_mode="Markdown",
                 reply_markup=create_user_menu_with_new_app()
             )
@@ -988,11 +960,11 @@ async def process_rejection(context, app_id, reason, query=None) -> bool:
         
         if query:
             try:
-                await query.edit_message_text(f"✅ *Заявка отклонена и перенесена в архив.*\nПричина: {reason}", parse_mode="Markdown")
+                await query.edit_message_text(f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}", parse_mode="Markdown")
             except:
                 await context.bot.send_message(
                     query.from_user.id,
-                    f"✅ *Заявка отклонена и перенесена в архив.*\nПричина: {reason}",
+                    f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}",
                     parse_mode="Markdown"
                 )
         
@@ -1025,8 +997,7 @@ async def notify_admins_about_new_app(context, user_id: int, user_name: str, use
     username_display = f"@{username}" if username else "-"
     
     app_info = (
-        f"🆕 *Новая заявка:*\n\n"
-        f"🏘️ *{COMPLEX}*\n"
+        f"🆕 *Новая заявка {COMPLEX}:*\n\n"
         f"🏠 Адрес: {house_address}, кв. {flat}\n\n"
         f"👤 Имя: {display_name}\n"
         f"👨‍💻 Ник: {username_display}\n"
@@ -1094,9 +1065,8 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         if not house.get("chat_link"):
             await context.bot.send_message(
                 user_id,
-                f"✅ *Заявка одобрена!*\n\n"
-                f"🏘️ *{COMPLEX}*\n"
-                f"📍 {house['address']}\n\n"
+                f"✅ *Заявка одобрена {COMPLEX}:*\n\n"
+                f"🏠 Адрес: {house['address']}\n\n"
                 "⚠️ Ссылка не настроена. Админ свяжется.",
                 parse_mode="Markdown"
             )
@@ -1108,8 +1078,7 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         nick_display = f"@{username}" if username else "-"
         
         message = (
-            f"✅ *Заявка одобрена:*\n\n"
-            f"🏘️ *{COMPLEX}*\n"
+            f"✅ *Заявка одобрена {COMPLEX}:*\n\n"
             f"🏠 Адрес: {house['address']}, кв. {user_data.get('flat', '')}\n"
             f"🔗 *Ссылка на чат дома:*\n"
             f"{house['chat_link']}\n\n"
@@ -1209,14 +1178,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     reply_markup=ADMIN_MENU
                 )
             else:
-                # Обычный пользователь - сразу переходим к вводу квартиры
+                # Обычный пользователь - приветствие
                 house = HOUSES[house_param]
+                
+                welcome_text = (
+                    f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
+                    f"🏠 Ваш дом: {house['address']}\n\n"
+                    f"📝 *Для подачи заявки в домовой чат:*\n"
+                    f"1. Укажите номер квартиры\n"
+                    f"2. Предоставьте кадастровый номер\n\n"
+                    f"⏱️ *Рассмотрение:* 1-3 дня\n"
+                    f"✅ *После одобрения:* получите ссылку на чат"
+                )
+                
+                await update.message.reply_text(
+                    welcome_text,
+                    parse_mode="Markdown",
+                    reply_markup=create_user_menu()
+                )
+                
+                # Небольшая пауза
+                await asyncio.sleep(1)
+                
                 context.user_data["step"] = "flat"
                 
                 await send_app_message(
-                    update, context,
-                    f"📝 *Заявка:*\n"
-                    f"🏘️ *{COMPLEX}*\n"
+                    user.id, context,
+                    f"📝 *Заявка {COMPLEX}:*\n"
                     f"🏠 Адрес: {house['address']}\n\n"
                     f"Введите номер вашей квартиры:",
                     create_user_menu_during_entry()
@@ -1241,11 +1229,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=ADMIN_MENU
         )
     else:
+        # Приветствие для обычного входа
+        welcome_text = (
+            f"👋 *Добро пожаловать в бот {COMPLEX}!*\n\n"
+            f"📝 *Для подачи заявки в домовой чат:*\n"
+            f"1. Выберите ваш дом\n"
+            f"2. Укажите номер квартиры\n"
+            f"3. Предоставьте кадастровый номер\n\n"
+            f"⏱️ *Рассмотрение:* 1-3 дня\n"
+            f"✅ *После одобрения:* получите ссылку на чат"
+        )
+        
+        await update.message.reply_text(
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=create_user_menu()
+        )
+        
         # Если несколько домов И пользователь без специальной ссылки
         if len(HOUSES) > 1:
+            # Небольшая пауза
+            await asyncio.sleep(1)
+            
+            # Первое окно: выбор дома
             houses_text = (
-                f"📝 *Заявка:*\n"
-                f"🏘️ *{COMPLEX}*\n\n"
+                f"📝 *Заявка {COMPLEX}:*\n\n"
                 f"🏠 *Выберите ваш адрес:*\n\n"
             )
             
@@ -1257,21 +1265,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data["step"] = "select_house"
             
             await send_app_message(
-                update, context,
+                user.id, context,
                 houses_text,
                 create_user_menu()
             )
         else:
-            # Если только один дом - сразу к вводу квартиры
+            # Если только один дом - небольшая пауза
+            await asyncio.sleep(1)
+            
             house_id = list(HOUSES.keys())[0]
             context.user_data["house_id"] = house_id
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
+            # Второе окно: ввод квартиры
             await send_app_message(
-                update, context,
-                f"📝 *Заявка:*\n"
-                f"🏘️ *{COMPLEX}*\n"
+                user.id, context,
+                f"📝 *Заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
                 create_user_menu_during_entry()
@@ -1339,8 +1349,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         status_msg = (
             f"📋 *Статус заявки:*\n\n"
-            f"📝 *Заявка:*\n"
-            f"🏘️ *{COMPLEX}*\n"
+            f"📝 *Заявка {COMPLEX}:*\n"
             f"🏠 Адрес: {house_address}, кв. {user_app.get('flat', '-')}\n"
             f"📄 Кадастровый номер: {user_app.get('cadastre', '-')}\n"
             f"📌 Статус: {user_app.get('status', '-')}"
@@ -1405,6 +1414,25 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             return
         
+        # Приветствие
+        welcome_text = (
+            f"👋 *Начинаем оформление заявки {COMPLEX}:*\n\n"
+            f"📝 *Вам потребуется:*\n"
+            f"1. Выбрать дом (если их несколько)\n"
+            f"2. Указать номер квартиры\n"
+            f"3. Предоставить кадастровый номер\n\n"
+            f"⏱️ *Срок рассмотрения:* 1-3 дня"
+        )
+        
+        await update.message.reply_text(
+            welcome_text,
+            parse_mode="Markdown",
+            reply_markup=create_user_menu()
+        )
+        
+        # Небольшая пауза
+        await asyncio.sleep(1)
+        
         # Если только один дом
         if len(HOUSES) == 1:
             house_id = list(HOUSES.keys())[0]
@@ -1412,22 +1440,21 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data["step"] = "flat"
             
             house = HOUSES[house_id]
+            # Второе окно: ввод квартиры
             await send_app_message(
-                update, context,
-                f"📝 *Заявка:*\n"
-                f"🏘️ *{COMPLEX}*\n"
+                user.id, context,
+                f"📝 *Заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house['address']}\n\n"
                 f"Введите номер вашей квартиры:",
                 create_user_menu_during_entry()
             )
             return
         
-        # Если несколько домов
+        # Если несколько домов - первое окно: выбор дома
         context.user_data["step"] = "select_house"
         
         houses_text = (
-            f"📝 *Заявка:*\n"
-            f"🏘️ *{COMPLEX}*\n\n"
+            f"📝 *Заявка {COMPLEX}:*\n\n"
             f"🏠 *Выберите ваш адрес:*\n\n"
         )
         
@@ -1437,7 +1464,7 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         houses_text += f"\nНапишите номер (1-{len(HOUSES)}):"
         
         await send_app_message(
-            update, context,
+            user.id, context,
             houses_text,
             create_user_menu()
         )
@@ -1454,8 +1481,9 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                 
                 house = HOUSES[house_id]
                 await send_app_message(
-                    update, context,
-                    f"✅ {house['address']}\n\n"
+                    user.id, context,
+                    f"📝 *Заявка {COMPLEX}:*\n"
+                    f"🏠 Адрес: {house['address']}\n\n"
                     f"Введите номер квартиры:",
                     create_user_menu_during_entry()
                 )
@@ -1517,9 +1545,8 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         
         await send_app_message(
-            update, context,
-            f"📝 *Заявка:*\n"
-            f"🏘️ *{COMPLEX}*\n"
+            user.id, context,
+            f"📝 *Заявка {COMPLEX}:*\n"
             f"🏠 Адрес: {house_address}, кв. {text.strip()}\n\n"
             "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
             create_user_menu_during_entry()
@@ -1552,15 +1579,14 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         confirm_text = (
             f"📋 *Проверьте введенные данные:*\n\n"
-            f"📝 *Заявка:*\n"
-            f"🏘️ *{COMPLEX}*\n"
+            f"📝 *Заявка {COMPLEX}:*\n"
             f"🏠 Адрес: {house_address}, кв. {flat_number}\n"
             f"📄 Кадастровый номер: {cadastre}\n\n"
             f"Всё верно?"
         )
         
         await send_app_message(
-            update, context,
+            user.id, context,
             confirm_text,
             create_cad_confirm_keyboard()
         )
@@ -1600,8 +1626,7 @@ async def handle_admin_message(update: Update, context: ContextTypes.DEFAULT_TYP
             nick_display = f"@{username}" if username else "-"
             
             app_text = (
-                f"📝 *Заявка:*\n"
-                f"🏘️ *{COMPLEX}*\n"
+                f"📝 *Заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
                 f"👤 Имя: {user_name}\n"
                 f"👨‍💻 Ник: {nick_display}\n"
@@ -1869,8 +1894,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Показываем пользователю его заявку
         await update.message.reply_text(
             f"✅ *Заявка отправлена на рассмотрение!*\n\n"
-            f"📝 *Ваша заявка:*\n"
-            f"🏘️ *{COMPLEX}*\n"
+            f"📝 *Ваша заявка {COMPLEX}:*\n"
             f"🏠 Адрес: {house_address}, кв. {context.user_data.get('flat', '-')}\n"
             f"📄 Кадастровый номер: {context.user_data.get('cad', '-')}\n\n"
             f"⏳ Статус: На рассмотрении",
@@ -1884,7 +1908,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         # Очищаем сообщения заявки
         try:
-            await delete_previous_app_messages(update, context)
+            await delete_previous_app_messages(user.id, context)
         except:
             pass
         
@@ -1921,15 +1945,14 @@ async def handle_user_callback(query, context, data, user):
             
             # Удаляем сообщения заявки
             try:
-                await delete_previous_app_messages(update, context)
-            except:
-                pass
+                await delete_previous_app_messages(user.id, context)
+            except Exception as e:
+                logger.error(f"Ошибка удаления сообщений: {e}")
             
             # Показываем пользователю его заявку
             await query.edit_message_text(
                 f"✅ *Заявка отправлена на рассмотрение!*\n\n"
-                f"📝 *Ваша заявка:*\n"
-                f"🏘️ *{COMPLEX}*\n"
+                f"📝 *Ваша заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
                 f"📄 Кадастровый номер: {context.user_data['cad']}\n\n"
                 f"⏳ Статус: На рассмотрении",
@@ -1940,10 +1963,10 @@ async def handle_user_callback(query, context, data, user):
             if should_show_advice(user):
                 await context.bot.send_message(user.id, ADVICE_TEXT, parse_mode="Markdown")
             
-            # Отправляем меню с кнопкой статуса
+            # Отправляем меню
             await context.bot.send_message(
                 user.id,
-                "Теперь вы можете отслеживать статус заявки.",
+                "📋 Используйте кнопку «Статус заявки» для отслеживания.",
                 reply_markup=create_user_menu_after_app_submission()
             )
             
@@ -1960,14 +1983,24 @@ async def handle_user_callback(query, context, data, user):
         house_address = HOUSES[house_id]["address"] if house_id in HOUSES else "-"
         flat_number = context.user_data['flat']
         
-        await send_app_message(
-            update, context,
-            f"📝 *Заявка:*\n"
-            f"🏘️ *{COMPLEX}*\n"
-            f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
-            "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
-            create_user_menu_during_entry()
-        )
+        # Используем query для редактирования текущего сообщения
+        try:
+            await query.edit_message_text(
+                f"📝 *Заявка {COMPLEX}:*\n"
+                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
+                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+                parse_mode="Markdown",
+                reply_markup=None  # Убираем клавиатуру
+            )
+        except:
+            # Если не удалось отредактировать, отправляем новое
+            await send_app_message(
+                user.id, context,
+                f"📝 *Заявка {COMPLEX}:*\n"
+                f"🏠 Адрес: {house_address}, кв. {flat_number}\n\n"
+                "Введите кадастровый номер или отправьте файл документа с номером (фото/PDF):",
+                create_user_menu_during_entry()
+            )
         return
 
 async def handle_admin_callback(query, context, data, user):
@@ -2017,7 +2050,7 @@ async def handle_admin_callback(query, context, data, user):
                     await process_rejection(context, target_id, template_text, query)
                     return
         
-        # Обработка типовых ответов
+        # Обработка типовых ответы
         if action == "reply_template":
             if len(parts) == 3:
                 template_hash = parts[2]
@@ -2100,8 +2133,7 @@ async def handle_admin_callback(query, context, data, user):
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
                     confirmation_text = (
-                        f"⛔ *Пользователь заблокирован:*\n"
-                        f"🏘️ {COMPLEX}\n"
+                        f"⛔ *Пользователь заблокирован {COMPLEX}:*\n"
                         f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
                         f"👤 Имя: {user_name}\n"
                         f"👨‍💻 Ник: {username_display}\n"
@@ -2151,8 +2183,7 @@ async def handle_admin_callback(query, context, data, user):
                     username_display = f"@{target_user_nick}" if target_user_nick and target_user_nick != '-' else "-"
                     
                     confirmation_text = (
-                        f"✅ *Пользователь разблокирован:*\n"
-                        f"🏘️ {COMPLEX}\n"
+                        f"✅ *Пользователь разблокирован {COMPLEX}:*\n"
                         f"🏠 Адрес: {house_address}, кв. {apps[target_id].get('flat', '-') if target_id in apps else '-'}\n"
                         f"👤 Имя: {user_name}\n"
                         f"👨‍💻 Ник: {username_display}\n"
@@ -2368,8 +2399,7 @@ async def handle_archive_callback(query, context, data, user):
                     pass
             
             detail_text = (
-                f"📋 *Подробности заявки:*\n\n"
-                f"🏘️ *{COMPLEX}*\n"
+                f"📋 *Подробности заявки {COMPLEX}:*\n\n"
                 f"🏠 Адрес: {house_address}\n"
                 f"🏢 Квартира: {app.get('flat', '-')}\n\n"
                 f"👤 Имя: {user_name}\n"
@@ -2457,8 +2487,7 @@ async def show_archive_apps(context, user_id: int, apps_list: List[Tuple[str, Di
                 created = app['created_at'][:10]
         
         app_text = (
-            f"📁 *Архивная заявка ({i+1}/{len(apps_list)})*\n"
-            f"🏘️ *{COMPLEX}*\n"
+            f"📁 *Архивная заявка {COMPLEX} ({i+1}/{len(apps_list)}):*\n"
             f"🏠 Адрес: {house_address}, кв. {app.get('flat', '-')}\n\n"
             f"👤 Имя: {user_name}\n"
             f"👨‍💻 Ник: {nick_display}\n"
@@ -2482,10 +2511,7 @@ async def show_archive_apps(context, user_id: int, apps_list: List[Tuple[str, Di
         
         # Кнопки для архива
         keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✉️ Написать", callback_data=f"archive_msg:{app_id}"),
-                InlineKeyboardButton("📋 Подробнее", callback_data=f"archive_detail:{app_id}")
-            ]
+            [InlineKeyboardButton("✉️ Написать", callback_data=f"archive_msg:{app_id}")]
         ])
         
         # Проверяем наличие файла
@@ -2581,7 +2607,7 @@ async def archive_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     rejected = sum(1 for a in archive.values() if a.get("status") == STATUS_TEXT["rejected"])
     
     text = (
-        f"📁 *Архив заявок:*\n\n"
+        f"📁 *Архив заявок {COMPLEX}:*\n\n"
         f"📊 Статистика:\n"
         f"• Всего: {total} заявок\n"
         f"• Одобрено: {approved}\n"
@@ -2605,7 +2631,7 @@ async def blacklist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("📭 Черный список пуст.")
         return
     
-    text = "⛔ *Черный список пользователей:*\n\n"
+    text = f"⛔ *Черный список {COMPLEX}:*\n\n"
     
     for i, user_id in enumerate(blacklist, 1):
         # Ищем информацию о пользователе
@@ -2697,7 +2723,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if "rejecting_app" in context.chat_data:
         app_id = context.chat_data["rejecting_app"]
         if await process_rejection(context, app_id, text):
-            await update.message.reply_text(f"✅ *Заявка отклонена и перенесена в архив.*\nПричина: {text}", parse_mode="Markdown")
+            await update.message.reply_text(f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {text}", parse_mode="Markdown")
         else:
             await update.message.reply_text("❌ Ошибка при отклонении заявки.")
         context.chat_data.pop("rejecting_app", None)
@@ -2794,7 +2820,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Ищем заявку по ID
             if text in archive:
                 apps_list = [(text, archive[text])]
-                await update.message.reply_text(f"🔍 *Найдена заявка:*", parse_mode="Markdown")
+                await update.message.reply_text(f"🔍 *Найдена заявка {COMPLEX}:*", parse_mode="Markdown")
                 await show_archive_apps(context, user.id, apps_list, "search")
             else:
                 await update.message.reply_text(f"❌ Заявка с ID {text} не найдена в архиве.")
@@ -2821,7 +2847,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ================== ЗАПУСК БОТА И HTTP СЕРВЕРА ==================
 async def main_async() -> None:
-    """Основная асинхронная функция запуска бота и HTTP сервера"""
+    """Основная асинхронная функции запуска бота и HTTP сервера"""
     if not BOT_TOKEN:
         logger.error("❌ Токен бота не установлен!")
         return
