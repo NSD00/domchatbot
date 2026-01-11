@@ -918,7 +918,7 @@ async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if os.path.exists(file_path):
                 os.remove(file_path)
         except:
-        pass
+            pass
     
     # Возвращаем пользователя в главное меню
     context.user_data.clear()
@@ -2994,3 +2994,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
