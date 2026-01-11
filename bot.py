@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.5.3"  # Увеличил версию на +0.0.1
+BOT_VERSION = "1.5.4"  # Увеличил версию на +0.0.1 для добавления чата админов
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -446,7 +446,7 @@ def cleanup_archive() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass
+                        pass
                 
                 del archive[app_id]
                 removed_count += 1
@@ -653,11 +653,12 @@ def create_user_menu_during_entry() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
+# ОБНОВЛЕННОЕ АДМИН-МЕНЮ С ЧАТОМ
 ADMIN_MENU = ReplyKeyboardMarkup(
     [
         ["📋 Список заявок", "📊 Статистика"],
         ["📁 Архив", "⛔ Черный список"],
-        ["📦 Экспорт JSON"]
+        ["💬 Чат админов", "📦 Экспорт JSON"]  # Добавлен чат админов
     ],
     resize_keyboard=True
 )
@@ -709,6 +710,58 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
     buttons.append([InlineKeyboardButton("✏️ Свой ответ", callback_data=f"reply_custom:{target_user_id}")])
     buttons.append([InlineKeyboardButton("↩️ Отмена", callback_data=f"cancel_reply:{target_user_id}")])
     return InlineKeyboardMarkup(buttons)
+
+# ================== НОВЫЕ ФУНКЦИИ ДЛЯ ЧАТА АДМИНОВ ==================
+def create_admin_chat_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для чата админов"""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("↩️ Ответить", callback_data="admin_reply"),
+            InlineKeyboardButton("👁️ Пропустить", callback_data="admin_skip")
+        ]
+    ])
+
+async def send_admin_chat_message(context, sender_id: int, message: str, reply_to_msg_id: int = None) -> None:
+    """
+    Отправляет сообщение в чат админов всем администраторам кроме отправителя
+    """
+    sender_name = "Неизвестный"
+    
+    # Получаем информацию об отправителе
+    try:
+        chat_member = await context.bot.get_chat(sender_id)
+        sender_name = chat_member.full_name or f"Admin_{sender_id}"
+    except:
+        sender_name = f"Admin_{sender_id}"
+    
+    username = ""
+    try:
+        chat_member = await context.bot.get_chat(sender_id)
+        if chat_member.username:
+            username = f" @{chat_member.username}"
+    except:
+        pass
+    
+    # Форматируем сообщение
+    formatted_message = (
+        f"💬 *Чат админов*\n\n"
+        f"👤 *От:* {sender_name}{username}\n"
+        f"🆔 ID: `{sender_id}`\n\n"
+        f"📝 *Сообщение:*\n{message}"
+    )
+    
+    # Отправляем всем другим админам
+    for admin_id in ADMINS:
+        if admin_id != sender_id:
+            try:
+                await context.bot.send_message(
+                    admin_id,
+                    formatted_message,
+                    parse_mode="Markdown",
+                    reply_markup=create_admin_chat_keyboard()
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки сообщения в чат админу {admin_id}: {e}")
 
 # ================== ОБНОВЛЕННЫЕ ФУНКЦИИ СООБЩЕНИЙ ==================
 async def send_application_message(user_id: int, context: ContextTypes.DEFAULT_TYPE,
@@ -1137,7 +1190,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Удаляем сообщения формы заявки
         await cleanup_application_messages(user.id, context)
         
-        # Собираем финальное сообщение
+        # Собираем финальное сообщение (ИСПРАВЛЕННЫЙ КОД)
         final_message = (
             f"✅ *Заявка отправлена на рассмотрение!*\n\n"
             f"📝 *Ваша заявка {COMPLEX}:*\n"
@@ -1147,23 +1200,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"📅 *Срок рассмотрения:* 1-3 дня"
         )
         
-        # Добавляем совет, если нужно
+        # Добавляем совет, если нужно (ИСПРАВЛЕННЫЙ КОД)
         if should_show_advice(user):
-            final_message += (
-                f"\n\n> 💡 *Совет для будущих заявок:*\n"
-                f"> \n"
-                f"> Администраторам проще проверить заявки, когда указаны Имя и Telegram ник (@username).\n"
-                f"> \n"
-                f"> Такие заявки часто рассматриваются быстрее. Учтите на будущее! 👍\n"
-                f"> \n"
-                f"> 📌 *Как добавить:*\n"
-                f"> 1. В настройках Telegram укажите Имя\n"
-                f"> 2. Установите Username (@ваш_ник)"
+            # Важно: экранируем символы, которые могут сломать Markdown
+            advice_text = (
+                f"\n\n💡 *Совет для будущих заявок:*\n"
+                f"\n"
+                f"Администраторам проще проверить заявки, когда указаны *Имя* и *Telegram ник* \\(@username\\)\\.\n"
+                f"\n"
+                f"Такие заявки часто рассматриваются быстрее\\. Учтите на будущее\\! 👍\n"
+                f"\n"
+                f"📌 *Как добавить:*\n"
+                f"1\\. В настройках Telegram укажите Имя\n"
+                f"2\\. Установите Username \\(@ваш\\_ник\\)"
             )
+            final_message += advice_text
         
         await update.message.reply_text(
             final_message,
-            parse_mode="Markdown",
+            parse_mode="MarkdownV2",  # Используем MarkdownV2 для лучшей совместимости
             reply_markup=create_user_menu_after_app_submission()
         )
         
@@ -1200,34 +1255,36 @@ async def handle_user_callback(query, context, data, user):
             # Удаляем сообщения формы заявки
             await cleanup_application_messages(user.id, context)
             
-            # Собираем финальное сообщение
+            # Собираем финальное сообщение (ИСПРАВЛЕННЫЙ КОД)
             final_message = (
-                f"✅ *Заявка отправлена на рассмотрение!*\n\n"
+                f"✅ *Заявка отправлена на рассмотрение\\!*\n\n"
                 f"📝 *Ваша заявка {COMPLEX}:*\n"
-                f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
-                f"📄 Кадастровый номер: {context.user_data['cad']}\n\n"
+                f"🏠 Адрес: {house_address}, кв\\. {context\\.user_data['flat']}\n"
+                f"📄 Кадастровый номер: {context\\.user_data['cad']}\n\n"
                 f"⏳ *Статус:* На рассмотрении\n"
-                f"📅 *Срок рассмотрения:* 1-3 дня"
+                f"📅 *Срок рассмотрения:* 1\\-3 дня"
             )
             
-            # Добавляем совет, если нужно
+            # Добавляем совет, если нужно (ИСПРАВЛЕННЫЙ КОД)
             if should_show_advice(user):
-                final_message += (
-                    f"\n\n> 💡 *Совет для будущих заявок:*\n"
-                    f"> \n"
-                    f"> Администраторам проще проверить заявки, когда указаны Имя и Telegram ник (@username).\n"
-                    f"> \n"
-                    f"> Такие заявки часто рассматриваются быстрее. Учтите на будущее! 👍\n"
-                    f"> \n"
-                    f"> 📌 *Как добавить:*\n"
-                    f"> 1. В настройках Telegram укажите Имя\n"
-                    f"> 2. Установите Username (@ваш_ник)"
+                # Экранируем специальные символы MarkdownV2
+                advice_text = (
+                    f"\n\n💡 *Совет для будущих заявок:*\n"
+                    f"\n"
+                    f"Администраторам проще проверить заявки, когда указаны *Имя* и *Telegram ник* \\(@username\\)\\.\n"
+                    f"\n"
+                    f"Такие заявки часто рассматриваются быстрее\\. Учтите на будущее\\! 👍\n"
+                    f"\n"
+                    f"📌 *Как добавить:*\n"
+                    f"1\\. В настройках Telegram укажите Имя\n"
+                    f"2\\. Установите Username \\(@ваш\\_ник\\)"
                 )
+                final_message += advice_text
             
             await context.bot.send_message(
                 user.id,
                 final_message,
-                parse_mode="Markdown",
+                parse_mode="MarkdownV2",  # Используем MarkdownV2
                 reply_markup=create_user_menu_after_app_submission()
             )
             
@@ -1389,6 +1446,45 @@ async def send_simple_invite(context, user_id: int, user_data: Dict) -> bool:
         logger.error(f"Ошибка отправки: {e}")
         return False
 
+# ================== НОВЫЙ ОБРАБОТЧИК ДЛЯ ЧАТА АДМИНОВ ==================
+async def handle_admin_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик чата админов"""
+    user = update.effective_user
+    
+    if not is_admin(user.id):
+        await update.message.reply_text(
+            "❌ У вас нет доступа к чату админов.",
+            reply_markup=create_user_menu(user.id)
+        )
+        return
+    
+    text = update.message.text.strip()
+    
+    if not text:
+        await update.message.reply_text(
+            "💬 *Чат админов*\n\n"
+            "Напишите сообщение для других администраторов:",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([["↩️ Назад"]], resize_keyboard=True)
+        )
+        return
+    
+    if text == "↩️ Назад":
+        await update.message.reply_text(
+            "👑 *Административная панель*",
+            parse_mode="Markdown",
+            reply_markup=ADMIN_MENU
+        )
+        return
+    
+    # Отправляем сообщение другим админам
+    await send_admin_chat_message(context, user.id, text)
+    
+    await update.message.reply_text(
+        "✅ Сообщение отправлено другим администраторам.",
+        reply_markup=ADMIN_MENU
+    )
+
 # ================== ДОПОЛНИТЕЛЬНЫЕ ОБРАБОТЧИКИ ==================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -1414,6 +1510,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     if text == "❓ Помощь" or any(keyword in text_lower for keyword in AUTO_HELP_KEYWORDS):
         await show_context_help(update, context)
+        return
+    
+    # Обработка чата админов
+    if is_admin(user.id) and text == "💬 Чат админов":
+        await handle_admin_chat(update, context)
         return
     
     if not is_admin(user.id):
@@ -2850,4 +2951,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
