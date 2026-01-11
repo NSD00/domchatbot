@@ -490,7 +490,7 @@ def cleanup_archive() -> int:
                     try:
                         os.remove(file_path)
                     except OSError:
-                        pass
+                        pass  # Файл уже удален или недоступен
                 
                 # Удаляем контактные файлы
                 contact_files = data.get("contact_files", [])
@@ -499,7 +499,7 @@ def cleanup_archive() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass
+                            pass  # Файл уже удален или недоступен
                 
                 del archive[app_id]
                 removed_count += 1
@@ -3082,4 +3082,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
