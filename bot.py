@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== КОНФИГУРАЦИЯ ==================
-BOT_VERSION = "1.5.0"
+BOT_VERSION = "1.5.1"  # Увеличил версию на +0.0.1
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x.strip()) for x in os.getenv("ADMINS", "").split(",") if x.strip()]
 
@@ -456,7 +456,7 @@ def cleanup_archive() -> int:
                         try:
                             os.remove(contact_file)
                         except OSError:
-                            pass
+                        pass
                 
                 del archive[app_id]
                 removed_count += 1
@@ -492,7 +492,7 @@ def cleanup_expired_applications() -> int:
             
             if now - created > timedelta(days=ACTIVE_APP_EXPIRE_DAYS):
                 data["status"] = STATUS_TEXT["rejected"]
-                data["reject_reason"] = "⏳ Время рассмотрения истекло (7 дней)"
+                data["reject_reason"] = "⏳ Время рассмотрения истекло."
                 
                 move_to_archive(app_id, data)
                 expired_count += 1
@@ -508,7 +508,7 @@ async def notify_expired_applications(context: ContextTypes.DEFAULT_TYPE) -> Non
     archive = load_json(ARCHIVE_FILE, {})
     
     for app_id, data in archive.items():
-        if data.get("reject_reason") == "⏳ Время рассмотрения истекло (7 дней)":
+        if data.get("reject_reason") == "⏳ Время рассмотрения истекло.":
             try:
                 user_id = int(app_id)
                 
@@ -720,12 +720,146 @@ def create_reply_templates_keyboard(target_user_id: str) -> InlineKeyboardMarkup
     buttons.append([InlineKeyboardButton("↩️ Отмена", callback_data=f"cancel_reply:{target_user_id}")])
     return InlineKeyboardMarkup(buttons)
 
+# ================== ОБНОВЛЕННЫЕ ФУНКЦИИ СООБЩЕНИЙ ==================
+async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE, 
+                          text: str, keyboard=None) -> int:
+    """Отправляет или редактирует сообщение заявки"""
+    user_data = context.user_data
+    
+    # Получаем ID предыдущего сообщения
+    last_msg_id = user_data.get("last_app_message_id")
+    
+    try:
+        if last_msg_id:
+            # Редактируем существующее сообщение
+            message = await context.bot.edit_message_text(
+                chat_id=user_id,
+                message_id=last_msg_id,
+                text=text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            # Первое сообщение - отправляем новое
+            message = await context.bot.send_message(
+                user_id,
+                text,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        
+        # Сохраняем ID для следующего редактирования
+        user_data["last_app_message_id"] = message.message_id
+        return message.message_id
+        
+    except telegram.error.BadRequest as e:
+        # Если не удалось отредактировать (например, сообщение удалено)
+        logger.error(f"Ошибка редактирования: {e}")
+        message = await context.bot.send_message(
+            user_id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        user_data["last_app_message_id"] = message.message_id
+        return message.message_id
+    except Exception as e:
+        logger.error(f"Ошибка отправки сообщения: {e}")
+        return None
+
+async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
+    contact_data = context.user_data.get("contact_data", {})
+    text = contact_data.get("text", "")
+    files = contact_data.get("files", [])
+    
+    if not text and not files:
+        await update.message.reply_text(
+            "❌ Сообщение пустое. Напишите текст или прикрепите файл.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    user_name = user.full_name if user.full_name else "-"
+    username_display = f"@{user.username}" if user.username else "-"
+    
+    full_contact_msg = (
+        f"✉️ *Сообщение от пользователя:*\n\n"
+        f"👤 Имя: {user_name}\n"
+        f"👨‍💻 Ник: {username_display}\n"
+        f"🆔 ID: {user.id}\n\n"
+        f"📝 Сообщение:\n{text if text else '(без текста)'}"
+    )
+    
+    if files:
+        full_contact_msg += f"\n\n📎 Прикреплено файлов: {len(files)}"
+    
+    sent_to_admins = False
+    for admin_id in ADMINS:
+        try:
+            admin_message = await context.bot.send_message(
+                admin_id,
+                full_contact_msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user.id}")
+                ]])
+            )
+            
+            for file_path in files:
+                try:
+                    ext = pathlib.Path(file_path).suffix.lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.gif']:
+                        with open(file_path, "rb") as photo_file:
+                            await context.bot.send_photo(
+                                admin_id,
+                                photo=photo_file,
+                                caption=f"Файл от пользователя {user.full_name}",
+                                reply_to_message_id=admin_message.message_id
+                            )
+                    else:
+                        with open(file_path, "rb") as doc_file:
+                            await context.bot.send_document(
+                                admin_id,
+                                document=doc_file,
+                                caption=f"Файл от пользователя {user.full_name}",
+                                reply_to_message_id=admin_message.message_id
+                            )
+                except Exception as e:
+                    logger.error(f"Ошибка отправки файла админу {admin_id}: {e}")
+            
+            sent_to_admins = True
+                    
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения админу {admin_id}: {e}")
+    
+    for file_path in files:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except:
+            pass
+    
+    context.user_data.clear()
+    
+    if sent_to_admins:
+        await update.message.reply_text(
+            "✅ Сообщение отправлено администратору!",
+            parse_mode="Markdown",
+            reply_markup=create_user_menu(user.id)
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Не удалось отправить сообщение. Попробуйте позже.",
+            parse_mode="Markdown",
+            reply_markup=create_user_menu(user.id)
+        )
+
 # ================== ОСНОВНЫЕ ОБРАБОТЧИКИ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     
-    if not context.user_data.get("step"):
-        context.user_data.clear()
+    # Очищаем предыдущие данные
+    context.user_data.clear()
     
     if not is_admin(user.id) and is_blocked(user.id):
         await update.message.reply_text(
@@ -1000,7 +1134,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"🏠 Адрес: {house_address}, кв. {context.user_data.get('flat', '-')}\n"
             f"📄 Кадастровый номер: {context.user_data.get('cad', '-')}\n\n"
             f"⏳ *Статус:* На рассмотрении\n"
-            f"📅 *Срок:* До 7 дней\n\n"
+            f"📅 *Срок рассмотрения:* 1-3 дня\n\n"
             f"📝 Используйте кнопку «Статус заявки» для отслеживания."
         )
         
@@ -1013,7 +1147,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if should_show_advice(user):
             advice_message = (
                 "━━━━━━━━━━━━━━━━\n\n"
-                "💡 *Совет для будущих заявок:*\n\n"
+                "💡 *Совет для будущих заявки:*\n\n"
                 "Администраторам проще проверить заявки, "
                 "когда указаны *Имя* и *Телеграм ник*.\n\n"
                 "Такие заявки часто рассматриваются быстрее. "
@@ -1024,16 +1158,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await context.bot.send_message(user.id, advice_message, parse_mode="Markdown")
         
-        try:
-            await delete_previous_app_messages(user.id, context)
-        except:
-            pass
-        
+        # Очищаем данные после успешной отправки
         context.user_data.clear()
     else:
         await update.message.reply_text("❌ Ошибка при сохранении заявки.")
 
 async def handle_user_callback(query, context, data, user):
+    """Обработка callback-ов от пользователя"""
     if data == "cad_ok":
         apps = load_json(APPS_FILE, {})
         
@@ -1058,39 +1189,34 @@ async def handle_user_callback(query, context, data, user):
             )
             
             try:
-                await delete_previous_app_messages(user.id, context)
-            except Exception as e:
-                logger.error(f"Ошибка удаления сообщений: {e}")
+                # Пытаемся отредактировать старое сообщение
+                await query.edit_message_text(
+                    f"✅ *Заявка отправлена на рассмотрение!*",
+                    parse_mode="Markdown"
+                )
+            except telegram.error.BadRequest:
+                # Если не получилось отредактировать — ничего страшного
+                pass
             
-            await query.edit_message_text(
-                f"✅ *Заявка отправлена на рассмотрение!*\n\n"
+            # Отправляем полное подтверждение новым сообщением
+            confirmation_text = (
                 f"📋 *Ваша заявка {COMPLEX}:*\n"
                 f"🏠 Адрес: {house_address}, кв. {context.user_data['flat']}\n"
                 f"📄 Кадастровый номер: {context.user_data['cad']}\n\n"
                 f"⏳ *Статус:* На рассмотрении\n"
-                f"📅 *Срок:* До 7 дней",
-                parse_mode="Markdown"
+                f"📅 *Срок рассмотрения:* 1-3 дня\n\n"
+                f"Используйте кнопку «📋 Статус заявки» для отслеживания."
             )
             
             await context.bot.send_message(
                 user.id,
-                "📝 Используйте кнопку «Статус заявки» для отслеживания.",
+                confirmation_text,
+                parse_mode="Markdown",
                 reply_markup=create_user_menu_after_app_submission()
             )
             
             if should_show_advice(user):
-                advice_message = (
-                    "━━━━━━━━━━━━━━━━\n\n"
-                    "💡 *Совет для будущих заявок:*\n\n"
-                    "Администраторам проще проверить заявки, "
-                    "когда указаны *Имя* и *Телеграм ник*.\n\n"
-                    "Такие заявки часто рассматриваются быстрее. "
-                    "Учтите на будущее! 👍\n\n"
-                    "📌 *Как добавить:*\n"
-                    "1. В настройках Telegram укажите Имя\n"
-                    "2. Установите Username (@ваш_ник)"
-                )
-                await context.bot.send_message(user.id, advice_message, parse_mode="Markdown")
+                await context.bot.send_message(user.id, ADVICE_TEXT, parse_mode="Markdown")
             
             context.user_data.clear()
         else:
@@ -1113,7 +1239,8 @@ async def handle_user_callback(query, context, data, user):
                 parse_mode="Markdown",
                 reply_markup=None
             )
-        except:
+        except telegram.error.BadRequest:
+            # Если не получилось отредактировать, отправляем новое сообщение
             await send_app_message(
                 user.id, context,
                 f"📝 *Заявка {COMPLEX}:*\n"
@@ -1124,166 +1251,6 @@ async def handle_user_callback(query, context, data, user):
         return
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
-async def delete_previous_app_messages(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_data = context.user_data
-    
-    msg_ids = user_data.get("app_message_ids", [])
-    for msg_id in msg_ids:
-        try:
-            await context.bot.delete_message(user_id, msg_id)
-        except:
-            pass
-    
-    user_data["app_message_ids"] = []
-
-async def send_app_message(user_id: int, context: ContextTypes.DEFAULT_TYPE, 
-                          text: str, keyboard=None) -> int:
-    user_data = context.user_data
-    
-    try:
-        await delete_previous_app_messages(user_id, context)
-    except Exception as e:
-        logger.error(f"Ошибка удаления сообщений: {e}")
-    
-    try:
-        message = await context.bot.send_message(
-            user_id,
-            text,
-            parse_mode="Markdown",
-            reply_markup=keyboard
-        )
-        
-        if "app_message_ids" not in user_data:
-            user_data["app_message_ids"] = []
-        user_data["app_message_ids"].append(message.message_id)
-        
-        return message.message_id
-        
-    except Exception as e:
-        logger.error(f"Ошибка отправки сообщения: {e}")
-        return None
-
-async def send_contact_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
-    contact_data = context.user_data.get("contact_data", {})
-    text = contact_data.get("text", "")
-    files = contact_data.get("files", [])
-    
-    if not text and not files:
-        await update.message.reply_text(
-            "❌ Сообщение пустое. Напишите текст или прикрепите файл.",
-            parse_mode="Markdown"
-        )
-        return
-    
-    user_name = user.full_name if user.full_name else "-"
-    username_display = f"@{user.username}" if user.username else "-"
-    
-    full_contact_msg = (
-        f"✉️ *Сообщение от пользователя:*\n\n"
-        f"👤 Имя: {user_name}\n"
-        f"👨‍💻 Ник: {username_display}\n"
-        f"🆔 ID: {user.id}\n\n"
-        f"📝 Сообщение:\n{text if text else '(без текста)'}"
-    )
-    
-    if files:
-        full_contact_msg += f"\n\n📎 Прикреплено файлов: {len(files)}"
-    
-    sent_to_admins = False
-    for admin_id in ADMINS:
-        try:
-            admin_message = await context.bot.send_message(
-                admin_id,
-                full_contact_msg,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✉️ Ответить", callback_data=f"reply:{user.id}")
-                ]])
-            )
-            
-            for file_path in files:
-                try:
-                    ext = pathlib.Path(file_path).suffix.lower()
-                    if ext in ['.jpg', '.jpeg', '.png', '.gif']:
-                        with open(file_path, "rb") as photo_file:
-                            await context.bot.send_photo(
-                                admin_id,
-                                photo=photo_file,
-                                caption=f"Файл от пользователя {user.full_name}",
-                                reply_to_message_id=admin_message.message_id
-                            )
-                    else:
-                        with open(file_path, "rb") as doc_file:
-                            await context.bot.send_document(
-                                admin_id,
-                                document=doc_file,
-                                caption=f"Файл от пользователя {user.full_name}",
-                                reply_to_message_id=admin_message.message_id
-                            )
-                except Exception as e:
-                    logger.error(f"Ошибка отправки файла админу {admin_id}: {e}")
-            
-            sent_to_admins = True
-                    
-        except Exception as e:
-            logger.error(f"Ошибка отправки сообщения админу {admin_id}: {e}")
-    
-    for file_path in files:
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-        except:
-            pass
-    
-    context.user_data.clear()
-    
-    if sent_to_admins:
-        await update.message.reply_text(
-            "✅ Сообщение отправлено администратору!",
-            parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
-        )
-    else:
-        await update.message.reply_text(
-            "❌ Не удалось отправить сообщение. Попробуйте позже.",
-            parse_mode="Markdown",
-            reply_markup=create_user_menu(user.id)
-        )
-
-async def process_rejection(context, app_id, reason, query=None) -> bool:
-    apps = load_json(APPS_FILE, {})
-    
-    if app_id in apps:
-        apps[app_id]["status"] = STATUS_TEXT["rejected"]
-        apps[app_id]["reject_reason"] = reason
-        
-        move_to_archive(app_id, apps[app_id])
-        
-        try:
-            await context.bot.send_message(
-                int(app_id),
-                f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n*Причина:* {reason}",
-                parse_mode="Markdown",
-                reply_markup=create_user_menu_with_new_app()
-            )
-        except Exception as e:
-            logger.error(f"Ошибка отправки уведомления об отклонении пользователю {app_id}: {e}")
-        
-        if query:
-            try:
-                await query.edit_message_text(f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}", parse_mode="Markdown")
-            except:
-                await context.bot.send_message(
-                    query.from_user.id,
-                    f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}",
-                    parse_mode="Markdown"
-                )
-        
-        context.chat_data.pop("pending_reject_app", None)
-        return True
-    
-    return False
-
 async def notify_admins_about_new_app(context, user_id: int, user_name: str, username: str, 
                                      flat: str, cadastre: str, file_path: Optional[str] = None) -> None:
     apps = load_json(APPS_FILE, {})
@@ -2132,6 +2099,40 @@ async def handle_admin_callback(query, context, data, user):
             return
     
     await query.edit_message_text("❌ Неизвестная команда.")
+
+async def process_rejection(context, app_id, reason, query=None) -> bool:
+    apps = load_json(APPS_FILE, {})
+    
+    if app_id in apps:
+        apps[app_id]["status"] = STATUS_TEXT["rejected"]
+        apps[app_id]["reject_reason"] = reason
+        
+        move_to_archive(app_id, apps[app_id])
+        
+        try:
+            await context.bot.send_message(
+                int(app_id),
+                f"❌ *Ваша заявка отклонена {COMPLEX}:*\n\n*Причина:* {reason}",
+                parse_mode="Markdown",
+                reply_markup=create_user_menu_with_new_app()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки уведомления об отклонении пользователю {app_id}: {e}")
+        
+        if query:
+            try:
+                await query.edit_message_text(f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}", parse_mode="Markdown")
+            except:
+                await context.bot.send_message(
+                    query.from_user.id,
+                    f"✅ *Заявка отклонена и перенесена в архив {COMPLEX}:*\nПричина: {reason}",
+                    parse_mode="Markdown"
+                )
+        
+        context.chat_data.pop("pending_reject_app", None)
+        return True
+    
+    return False
 
 async def handle_archive_callback(query, context, data, user):
     if not is_admin(user.id):
